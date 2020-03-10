@@ -40,7 +40,7 @@ pub fn link_module(
                         FloorF64 => wasmtime_f64_floor as usize,
                         TruncF64 => wasmtime_f64_trunc as usize,
                         NearestF64 => wasmtime_f64_nearest as usize,
-                        Probestack => PROBESTACK as usize,
+                        Probestack => panic!("unsupported probestack call {}", Probestack),
                         other => panic!("unexpected libcall: {}", other),
                     }
                 }
