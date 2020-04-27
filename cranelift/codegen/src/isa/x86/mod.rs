@@ -53,12 +53,35 @@ fn isa_constructor(
         PointerWidth::U32 => &enc_tables::LEVEL1_I32[..],
         PointerWidth::U64 => &enc_tables::LEVEL1_I64[..],
     };
-    Box::new(Isa {
-        triple,
-        isa_flags: settings::Flags::new(&shared_flags, builder),
-        shared_flags,
-        cpumode: level1,
-    })
+
+    let isa_flags = settings::Flags::new(&shared_flags, builder);
+
+    #[cfg(feature = "x64")]
+    return if isa_flags.use_new_backend() {
+        use super::x64;
+        x64::isa_builder(triple).finish(shared_flags)
+    } else {
+        Box::new(Isa {
+            triple,
+            isa_flags,
+            shared_flags,
+            cpumode: level1,
+        })
+    };
+
+    #[cfg(not(feature = "x64"))]
+    {
+        debug_assert!(
+            !isa_flags.use_new_backend(),
+            "new backend x86 support not included by cargo features!"
+        );
+        Box::new(Isa {
+            triple,
+            isa_flags,
+            shared_flags,
+            cpumode: level1,
+        })
+    }
 }
 
 impl TargetIsa for Isa {
