@@ -128,12 +128,15 @@ impl Context {
         traps: &mut dyn TrapSink,
         stackmaps: &mut dyn StackmapSink,
     ) -> CodegenResult<CodeInfo> {
+        println!("Mem len1: {:?} - {:x?}", mem.len(), mem);
         let info = self.compile(isa)?;
         let old_len = mem.len();
         mem.resize(old_len + info.total_size as usize, 0);
+        println!("Mem len2: {:?} - {:x?}", mem.len(), mem);
         let new_info = unsafe {
             self.emit_to_memory(isa, mem.as_mut_ptr().add(old_len), relocs, traps, stackmaps)
         };
+        println!("Mem len3: {:?} - {:x?}", mem.len(), mem);
         debug_assert!(new_info == info);
         Ok(info)
     }

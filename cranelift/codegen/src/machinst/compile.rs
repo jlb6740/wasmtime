@@ -20,9 +20,9 @@ where
 {
     // This lowers the CL IR.
     let mut vcode = Lower::new(f, abi).lower(b);
-
+    println!("Before Universe");
     let universe = &B::MInst::reg_universe(vcode.flags());
-
+    println!("After Universe {:?}", universe);
     debug!("vcode from lowering: \n{}", vcode.show_rru(Some(universe)));
 
     // Perform register allocation.
@@ -55,6 +55,7 @@ where
     vcode.remove_redundant_branches();
 
     // Do final passes over code to finalize branches.
+    println!("Finalize Branches\n");
     vcode.finalize_branches();
 
     debug!(

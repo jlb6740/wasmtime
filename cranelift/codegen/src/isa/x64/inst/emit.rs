@@ -1,4 +1,5 @@
 use regalloc::{Reg, RegClass};
+use std::backtrace::Backtrace;
 
 use crate::isa::x64::inst::*;
 
@@ -88,6 +89,7 @@ fn emit_REX_OPCODES_MODRM_SIB_IMM_encG_memE<O: MachSectionOutput>(
     memE: &Addr,
     flags: u32,
 ) {
+    println!("EMIT REX OPCODES 1\n");
     // General comment for this function: the registers in |memE| must be
     // 64-bit integer registers, because they are part of an address
     // expression.  But |encG| can be derived from a register of any class.
@@ -207,6 +209,7 @@ fn emit_REX_OPCODES_MODRM_encG_encE<O: MachSectionOutput>(
     encE: u8,
     flags: u32,
 ) {
+    println!("EMIT REX OPCODES 2\n");
     // EncG and EncE can be derived from registers of any class, and they
     // don't even have to be from the same class.  For example, for an
     // integer-to-FP conversion insn, one might be RegClass::I64 and the other
@@ -247,6 +250,7 @@ fn emit_REX_OPCODES_MODRM_SIB_IMM_regG_memE<O: MachSectionOutput>(
     memE: &Addr,
     flags: u32,
 ) {
+    println!("EMIT REX OPCODES 3\n");
     // JRS FIXME 2020Feb07: this should really just be |regEnc| not |iregEnc|
     let encG = iregEnc(regG);
     emit_REX_OPCODES_MODRM_SIB_IMM_encG_memE(sink, opcodes, numOpcodes, encG, memE, flags);
@@ -260,6 +264,8 @@ fn emit_REX_OPCODES_MODRM_regG_regE<O: MachSectionOutput>(
     regE: Reg,
     flags: u32,
 ) {
+    //let bt = Backtrace::force_capture();
+    println!("EMIT REX OPCODES 4\n");
     // JRS FIXME 2020Feb07: these should really just be |regEnc| not |iregEnc|
     let encG = iregEnc(regG);
     let encE = iregEnc(regE);
@@ -422,6 +428,7 @@ pub(crate) fn emit<O: MachSectionOutput>(inst: &Inst, sink: &mut O) {
             }
         }
         Inst::Mov_R_R { is_64, src, dst } => {
+            println!("Instruction Move R_R {:?} {:?} {:?}\n", is_64, src, dst);
             let flags = if *is_64 { F_NONE } else { F_CLEAR_REX_W };
             emit_REX_OPCODES_MODRM_regG_regE(sink, 0x89, 1, *src, *dst, flags);
         }
@@ -812,7 +819,17 @@ pub(crate) fn emit<O: MachSectionOutput>(inst: &Inst, sink: &mut O) {
                 }
             }
         }
-
+        Inst::SSE_Scalar_Mov_R_R { is_64, src, dst } => {
+            println!("TODO: emit Inst::SSE_Scalar_Mov_R_R");
+        }
+        Inst::SSE_Scalar_Alu_RM_R {
+            is_64,
+            op,
+            src,
+            dst,
+        } => {
+            println!("TODO: emit Inst::SSE_Scalar_Alu_RM_R");
+        }
         _ => panic!("x64_emit: unhandled: {} ", inst.show_rru(None)),
     }
 }

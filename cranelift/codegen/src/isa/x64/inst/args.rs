@@ -144,8 +144,8 @@ pub(crate) enum RM {
 impl RM {
     // Constructors.
 
-    fn reg(reg: Reg) -> Self {
-        debug_assert!(reg.get_class() == RegClass::I64);
+    pub(crate) fn reg(reg: Reg) -> Self {
+        debug_assert!(reg.get_class() == RegClass::I64 || reg.get_class() == RegClass::V128);
         RM::R { reg }
     }
 
@@ -200,6 +200,28 @@ impl RMI_R_Op {
 }
 
 impl fmt::Debug for RMI_R_Op {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        write!(fmt, "{}", self.to_string())
+    }
+}
+
+#[derive(Clone, PartialEq)]
+// Some basic ALU operations.
+pub enum FP_RM_R_Op {
+    Addss,
+    Subss,
+}
+
+impl FP_RM_R_Op {
+    pub(crate) fn to_string(&self) -> String {
+        match self {
+            FP_RM_R_Op::Addss => "addss".to_string(),
+            FP_RM_R_Op::Subss => "subss".to_string(),
+        }
+    }
+}
+
+impl fmt::Debug for FP_RM_R_Op {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         write!(fmt, "{}", self.to_string())
     }

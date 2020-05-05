@@ -50,8 +50,8 @@ pub fn run(
     flag_report_times: bool,
     flag_calc_value_ranges: bool,
 ) -> Result<(), String> {
+    println!("WasmRun: {:?}  -- {:?}", flag_set, flag_triple);
     let parsed = parse_sets_and_triple(flag_set, flag_triple)?;
-
     for filename in files {
         let path = Path::new(&filename);
         let name = String::from(path.as_os_str().to_string_lossy());

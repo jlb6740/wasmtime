@@ -38,6 +38,14 @@ fn int_ty_to_is64(ty: Type) -> bool {
     }
 }
 
+fn flt_ty_to_is64(ty: Type) -> bool {
+    match ty {
+        types::F32 => false,
+        types::F64 => true,
+        _ => panic!("type {} is none of F32, F64", ty),
+    }
+}
+
 fn int_ty_to_sizeB(ty: Type) -> u8 {
     match ty {
         types::I8 => 1,
@@ -105,7 +113,7 @@ fn lower_insn_to_regs<'a>(ctx: Ctx<'a>, iri: IRInst) {
     } else {
         None
     };
-
+    println!("Lower inst to reg opcode: {:?}", op);
     // This is all outstandingly feeble.  TODO: much better!
 
     let mut unimplemented = false;
@@ -543,11 +551,10 @@ fn lower_insn_to_regs<'a>(ctx: Ctx<'a>, iri: IRInst) {
             // TODO
             panic!("Vector ops not implemented.");
         }
-
         Opcode::Fcmp
         | Opcode::Ffcmp
-        | Opcode::Fadd
-        | Opcode::Fsub
+       // | Opcode::Fadd
+       // | Opcode::Fsub
         | Opcode::Fmul
         | Opcode::Fdiv
         | Opcode::Sqrt
@@ -630,7 +637,24 @@ fn lower_insn_to_regs<'a>(ctx: Ctx<'a>, iri: IRInst) {
         | Opcode::X86Pminu => {
             panic!("x86-specific opcode in supposedly arch-neutral IR!");
         }
-
+        Opcode::Fadd | Opcode::Fsub => {
+            let regD = ctx.output(iri, 0);
+            let regL = ctx.input(iri, 0);
+            let regR = ctx.input(iri, 1);
+            let is64 = flt_ty_to_is64(ty.unwrap());
+            let how = if op == Opcode::Fadd {
+                FP_RM_R_Op::Addss
+            } else {
+                FP_RM_R_Op::Subss
+            };
+            println!(
+                "regD: {:?}, regL: {:?}, regR: {:?} is64: {:?}\n",
+                regD, regL, regR, is64
+            );
+            ctx.emit(Inst::sse_scalar_mov_r_r(true, regL, regD));
+            ctx.emit(Inst::sse_scalar_alu_rm_r(is64, how, RM::reg(regR), regD));
+            //panic!("Addss/Subss op not implemented.");
+        }
         _ => panic!("Unsupported opcode!"),
     }
 
@@ -646,6 +670,7 @@ impl LowerBackend for X64Backend {
     type MInst = Inst;
 
     fn lower<C: LowerCtx<I = Inst>>(&self, ctx: &mut C, ir_inst: IRInst) {
+        println!("Lower in Backend {:?}", ir_inst);
         lower_insn_to_regs(ctx, ir_inst);
     }
 

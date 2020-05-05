@@ -1295,6 +1295,7 @@ fn define_fpu_ops(
     }
 
     // Binary arithmetic ops.
+    println!("IN HERE Binding!!!!!!!\n");
     e.enc_both(fadd.bind(F32), rec_fa.opcodes(&ADDSS));
     e.enc_both(fadd.bind(F64), rec_fa.opcodes(&ADDSD));
 

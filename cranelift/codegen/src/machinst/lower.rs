@@ -159,6 +159,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         let default_register = Reg::new_virtual(RegClass::I32, 0);
         let mut value_regs = SecondaryMap::with_default(default_register);
 
+        println!("Default: {:?}, Value: {:?}\n", default_register, value_regs);
         // Assign a vreg to each value.
         for bb in f.layout.blocks() {
             for param in f.dfg.block_params(bb) {
@@ -168,6 +169,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                     *param,
                     &mut next_vreg,
                 );
+                println!("VCODE PARAM: {:?} - {:?}\n", *param, vreg);
                 vcode.set_vreg_type(vreg, f.dfg.value_type(*param));
             }
             for inst in f.layout.block_insts(bb) {
@@ -178,6 +180,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                         *result,
                         &mut next_vreg,
                     );
+                    println!("VCODE VREG: {:?} - {:?}\n", *result, vreg);
                     vcode.set_vreg_type(vreg, f.dfg.value_type(*result));
                 }
             }
@@ -213,7 +216,9 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             );
             for (i, param) in self.f.dfg.block_params(entry_bb).iter().enumerate() {
                 let reg = Writable::from_reg(self.value_regs[*param]);
+                println!("Push almost insn for arg: {:?}", reg);
                 let insn = self.vcode.abi().gen_copy_arg_to_reg(i, reg);
+                println!("Push insn for arg: {:?} -  {:?}", reg, insn);
                 self.vcode.push(insn);
             }
         }
@@ -268,6 +273,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
 
     /// Lower the function.
     pub fn lower<B: LowerBackend<MInst = I>>(mut self, backend: &B) -> VCode<I> {
+        println!("In Lower\n");
         // Find all reachable blocks.
         let bbs = self.find_reachable_bbs();
 
@@ -289,6 +295,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         for bb in bbs.iter().rev() {
             for inst in self.f.layout.block_insts(*bb) {
                 let op = self.f.dfg[inst].opcode();
+                println!("Check if op is branch {:?}\n", op);
                 if op.is_branch() {
                     // Find the original target.
                     let mut add_succ = |next_bb| {
@@ -330,6 +337,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             for inst in self.f.layout.block_insts(*bb).rev() {
                 debug!("lower: inst {}", inst);
                 if edge_blocks_by_inst[inst].len() > 0 {
+                    println!("In Branch Stuff 1. about to push {:?}\n", inst);
                     branches.push(inst);
                     for target in edge_blocks_by_inst[inst].iter().rev().cloned() {
                         targets.push(target);
@@ -337,6 +345,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                 } else {
                     // We've reached the end of the branches -- process all as a group, first.
                     if branches.len() > 0 {
+                        println!("Last of Branch Stuff 2\n");
                         let fallthrough = self.f.layout.next_block(*bb);
                         let fallthrough = fallthrough.map(|bb| self.vcode.bb_to_bindex(bb));
                         branches.reverse();
@@ -356,18 +365,21 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                         branches.clear();
                         targets.clear();
                     }
-
+                    println!("Done Branch Stuff 1\n");
                     // Only codegen an instruction if it either has a side
                     // effect, or has at least one use of one of its results.
                     let num_uses = self.num_uses[inst];
                     let side_effect = has_side_effect(self.f, inst);
                     if side_effect || num_uses > 0 {
                         self.vcode.set_srcloc(self.srcloc(inst));
+                        println!("Not skipping. About to lower instruction\n");
                         backend.lower(&mut self, inst);
+                        println!("Done lower instruction\n");
                         self.vcode.end_ir_inst();
                     } else {
                         // If we're skipping the instruction, we need to dec-ref
                         // its arguments.
+                        println!("Skipping. Don't lower instruction\n");
                         for arg in self.f.dfg.inst_args(inst) {
                             let val = self.f.dfg.resolve_aliases(*arg);
                             match self.f.dfg.value_def(val) {
@@ -400,6 +412,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
 
             // If this is the entry block, produce the argument setup.
             if Some(*bb) == self.f.layout.entry_block() {
+                println!("Entry block gen arg setup\n");
                 self.gen_arg_setup();
                 self.vcode.end_ir_inst();
             }

@@ -153,9 +153,17 @@ impl<I: VCodeInst> VCodeBuilder<I> {
 
     /// Set the type of a VReg.
     pub fn set_vreg_type(&mut self, vreg: VirtualReg, ty: Type) {
+        // TO_ASK .. Why is this code pushing new default values
         while self.vcode.vreg_types.len() <= vreg.get_index() {
+            println!("Looping VCODE {:?}", self.vcode.vreg_types.len());
             self.vcode.vreg_types.push(ir::types::I8); // Default type.
         }
+        println!(
+            "Not Looping {:?} {:?} {:?}",
+            vreg.get_index(),
+            self.vcode.vreg_types.len(),
+            ty
+        );
         self.vcode.vreg_types[vreg.get_index()] = ty;
     }
 
@@ -516,6 +524,7 @@ impl<I: VCodeInst> VCode<I> {
             block_offsets[block as usize] = code_section.offset;
             let (start, end) = self.block_ranges[block as usize];
             for iix in start..end {
+                println!("Emit Code\n");
                 self.insts[iix as usize].emit(&mut code_section, flags);
             }
         }

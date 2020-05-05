@@ -78,28 +78,30 @@ fn r11() -> Reg {
 fn fpr(enc: u8, index: u8) -> Reg {
     Reg::new_real(RegClass::V128, enc, index)
 }
-fn xmm0() -> Reg {
+
+// TO_ASK: Why are the xmm registers originally private?
+pub fn xmm0() -> Reg {
     fpr(0, 14)
 }
-fn xmm1() -> Reg {
+pub fn xmm1() -> Reg {
     fpr(1, 15)
 }
-fn xmm2() -> Reg {
+pub fn xmm2() -> Reg {
     fpr(2, 16)
 }
-fn xmm3() -> Reg {
+pub fn xmm3() -> Reg {
     fpr(3, 17)
 }
-fn xmm4() -> Reg {
+pub fn xmm4() -> Reg {
     fpr(4, 18)
 }
-fn xmm5() -> Reg {
+pub fn xmm5() -> Reg {
     fpr(5, 19)
 }
-fn xmm6() -> Reg {
+pub fn xmm6() -> Reg {
     fpr(6, 20)
 }
-fn xmm7() -> Reg {
+pub fn xmm7() -> Reg {
     fpr(7, 21)
 }
 fn xmm8() -> Reg {

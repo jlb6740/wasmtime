@@ -161,6 +161,17 @@ pub(crate) enum Inst {
 
     /// jmpq (reg mem)
     JmpUnknown { target: RM },
+
+    /// (add sub and or xor mul adc? sbb?) (32 64) (reg addr imm) reg
+    SSE_Scalar_Alu_RM_R {
+        is_64: bool, // ?
+        op: FP_RM_R_Op,
+        src: RM,
+        dst: Reg,
+    },
+
+    /// mov (64 32) reg reg
+    SSE_Scalar_Mov_R_R { is_64: bool, src: Reg, dst: Reg },
 }
 
 // Handy constructors for Insts.
@@ -204,9 +215,52 @@ impl Inst {
 
     pub(crate) fn mov_r_r(is_64: bool, src: Reg, wdst: Writable<Reg>) -> Inst {
         let dst = wdst.to_reg();
+        println!(
+            "Src Class {:?}, Dst Class {:?}",
+            src.get_class(),
+            dst.get_class()
+        );
+        //panic!("What lower");
+        if (src.get_class() == RegClass::I64) && (dst.get_class() == RegClass::I64) {
+            return Inst::Mov_R_R { is_64, src, dst };
+        } else if ((src.get_class() == RegClass::V128) && (dst.get_class() == RegClass::V128)) {
+            return Inst::Mov_R_R { is_64, src, dst };
+        }
+        panic!("Unsupported RegClass");
         debug_assert!(src.get_class() == RegClass::I64);
         debug_assert!(dst.get_class() == RegClass::I64);
-        Inst::Mov_R_R { is_64, src, dst }
+    }
+
+    pub(crate) fn sse_scalar_mov_r_r(is_64: bool, src: Reg, wdst: Writable<Reg>) -> Inst {
+        let dst = wdst.to_reg();
+        println!(
+            "Src Class {:?}, Dst Class {:?}",
+            src.get_class(),
+            dst.get_class()
+        );
+        //panic!("What lower");
+        if ((src.get_class() == RegClass::V128) && (dst.get_class() == RegClass::V128)) {
+            return Inst::SSE_Scalar_Mov_R_R { is_64, src, dst };
+        }
+        panic!("Unsupported RegClass");
+        debug_assert!(src.get_class() == RegClass::I64);
+        debug_assert!(dst.get_class() == RegClass::I64);
+    }
+
+    pub(crate) fn sse_scalar_alu_rm_r(
+        is_64: bool,
+        op: FP_RM_R_Op,
+        src: RM,
+        wdst: Writable<Reg>,
+    ) -> Self {
+        let dst = wdst.to_reg();
+        debug_assert!(dst.get_class() == RegClass::V128);
+        Self::SSE_Scalar_Alu_RM_R {
+            is_64,
+            op,
+            src,
+            dst,
+        }
     }
 
     pub(crate) fn movzx_m_r(extMode: ExtMode, addr: Addr, wdst: Writable<Reg>) -> Inst {
@@ -369,6 +423,17 @@ impl ShowWithRRU for Inst {
                 src.show_rru_sized(mb_rru, sizeLQ(*is_64)),
                 show_ireg_sized(*dst, mb_rru, sizeLQ(*is_64)),
             ),
+            Inst::SSE_Scalar_Alu_RM_R {
+                is_64,
+                op,
+                src,
+                dst,
+            } => format!(
+                "SSE_ALU {} {}, {}",
+                ljustify2(op.to_string(), suffixLQ(*is_64)),
+                src.show_rru_sized(mb_rru, sizeLQ(*is_64)),
+                show_ireg_sized(*dst, mb_rru, sizeLQ(*is_64)),
+            ),
             Inst::Imm_R {
                 dst_is_64,
                 simm64,
@@ -392,6 +457,12 @@ impl ShowWithRRU for Inst {
             }
             Inst::Mov_R_R { is_64, src, dst } => format!(
                 "{} {}, {}",
+                ljustify2("mov".to_string(), suffixLQ(*is_64)),
+                show_ireg_sized(*src, mb_rru, sizeLQ(*is_64)),
+                show_ireg_sized(*dst, mb_rru, sizeLQ(*is_64))
+            ),
+            Inst::SSE_Scalar_Mov_R_R { is_64, src, dst } => format!(
+                "SSE_MOV: {} {}, {}",
                 ljustify2("mov".to_string(), suffixLQ(*is_64)),
                 show_ireg_sized(*src, mb_rru, sizeLQ(*is_64)),
                 show_ireg_sized(*dst, mb_rru, sizeLQ(*is_64))
@@ -529,6 +600,15 @@ fn x64_get_regs(inst: &Inst, collector: &mut RegUsageCollector) {
             src.get_regs_as_uses(collector);
             collector.add_mod(Writable::from_reg(*dst));
         }
+        Inst::SSE_Scalar_Alu_RM_R {
+            is_64: _,
+            op: _,
+            src,
+            dst,
+        } => {
+            src.get_regs_as_uses(collector);
+            collector.add_mod(Writable::from_reg(*dst));
+        }
         Inst::Imm_R {
             dst_is_64: _,
             simm64: _,
@@ -537,6 +617,10 @@ fn x64_get_regs(inst: &Inst, collector: &mut RegUsageCollector) {
             collector.add_def(Writable::from_reg(*dst));
         }
         Inst::Mov_R_R { is_64: _, src, dst } => {
+            collector.add_use(*src);
+            collector.add_def(Writable::from_reg(*dst));
+        }
+        Inst::SSE_Scalar_Mov_R_R { is_64: _, src, dst } => {
             collector.add_use(*src);
             collector.add_def(Writable::from_reg(*dst));
         }
@@ -702,6 +786,15 @@ fn x64_map_regs(
             src.apply_map(pre_map);
             apply_maps(dst, pre_map, post_map);
         }
+        Inst::SSE_Scalar_Alu_RM_R {
+            is_64: _,
+            op: _,
+            ref mut src,
+            ref mut dst,
+        } => {
+            src.apply_map(pre_map);
+            apply_maps(dst, pre_map, post_map);
+        }
         Inst::Imm_R {
             dst_is_64: _,
             simm64: _,
@@ -710,6 +803,14 @@ fn x64_map_regs(
             apply_map(dst, post_map);
         }
         Inst::Mov_R_R {
+            is_64: _,
+            ref mut src,
+            ref mut dst,
+        } => {
+            apply_map(src, pre_map);
+            apply_map(dst, post_map);
+        }
+        Inst::SSE_Scalar_Mov_R_R {
             is_64: _,
             ref mut src,
             ref mut dst,
@@ -861,6 +962,7 @@ impl MachInst for Inst {
         debug_assert!(rc_dst == rc_src);
         match rc_dst {
             RegClass::I64 => Inst::mov_r_r(true, src_reg, dst_reg),
+            RegClass::V128 => Inst::sse_scalar_mov_r_r(true, src_reg, dst_reg),
             _ => panic!("gen_move(x64): unhandled regclass"),
         }
     }
