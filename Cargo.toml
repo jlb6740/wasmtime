@@ -26,6 +26,7 @@ wasmtime = { path = "crates/wasmtime", version = "0.22.0", default-features = fa
 wasmtime-cache = { path = "crates/cache", version = "0.22.0" }
 wasmtime-debug = { path = "crates/debug", version = "0.22.0" }
 wasmtime-environ = { path = "crates/environ", version = "0.22.0" }
+wasmtime-export-hacks = { path = "crates/export-hacks", version = "0.22.0" }
 wasmtime-jit = { path = "crates/jit", version = "0.22.0" }
 wasmtime-obj = { path = "crates/obj", version = "0.22.0" }
 wasmtime-wast = { path = "crates/wast", version = "0.22.0" }

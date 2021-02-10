@@ -146,6 +146,7 @@ impl RunCommand {
 
         let mut linker = Linker::new(&store);
         populate_with_wasi(&mut linker, preopen_dirs, &argv, &self.vars)?;
+        populate_with_export_hacks(&mut linker)?;
 
         // Load the preload wasm modules.
         for (name, path) in self.preloads.iter() {
@@ -379,6 +380,70 @@ fn populate_with_wasi(
         WasiCryptoSignatures::new(linker.store(), cx_crypto.clone()).add_to_linker(linker)?;
         WasiCryptoSymmetric::new(linker.store(), cx_crypto).add_to_linker(linker)?;
     }
+
+    Ok(())
+}
+
+/// Populates the given `Linker` with WASI APIs.
+fn populate_with_export_hacks(linker: &mut Linker) -> Result<()> {
+    //
+    let wat = r#"
+    (module
+        (func (export "pthread_create") (param i32 i32 i32 i32) (result i32)
+            i32.const 1
+        )
+    )
+    "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
+
+    //
+    let wat = r#"
+    (module
+        (func (export "__sys_uname") (param i32) (result i32)
+            i32.const 1
+        )
+    )
+    "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
+
+    //
+    let wat = r#"
+    (module
+        (func (export "getentropy")(param i32 i32) (result i32)
+            i32.const 1
+        )
+    )
+    "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
+
+    //
+    let wat = r#"
+    (module
+        (func (export "pthread_join") (param i32 i32) (result i32)
+            i32.const 1
+        )
+    )
+    "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
+
+    //
+    let wat = r#"
+    (module
+        (func (export "emscripten_notify_memory_growth") (param i32)
+        )
+    )
+    "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
 
     Ok(())
 }
