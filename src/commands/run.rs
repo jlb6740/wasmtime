@@ -432,5 +432,28 @@ fn populate_with_export_hacks(linker: &mut Linker) -> Result<()> {
     let instance = linker.instantiate(&module).unwrap();
     linker.instance("env", &instance).unwrap();
 
+    //
+    let wat = r#"
+    (module
+        (func (export "longjmp") (param i32 i32)
+        )
+    )
+    "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
+
+    //
+    let wat = r#"
+    (module
+        (func (export "setjmp") (param i32) (result i32)
+            i32.const 0
+        )
+    )
+    "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
+
     Ok(())
 }
