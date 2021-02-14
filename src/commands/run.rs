@@ -455,5 +455,104 @@ fn populate_with_export_hacks(linker: &mut Linker) -> Result<()> {
     let instance = linker.instantiate(&module).unwrap();
     linker.instance("env", &instance).unwrap();
 
+    //(import "env" "dlopen" (func (;0;) (type 2)))
+    //(import "env" "dlsym" (func (;1;) (type 2)))
+    //(import "env" "pthread_join" (func (;2;) (type 2)))
+    //(import "env" "pthread_create" (func (;3;) (type 10)))
+    //(import "env" "open" (func (;4;) (type 1)))
+    //(import "env" "mmap" (func (;5;) (type 97)))
+    //(import "env" "munmap" (func (;6;) (type 2)))
+    //(import "env" "__sys_fstat64" (func (;7;) (type 2)))
+    //(import "env" "__sys_stat64" (func (;8;) (type 2)))
+
+    //(type (;1;) (func (param i32 i32 i32) (result i32)))
+    //(type (;2;) (func (param i32 i32) (result i32)))
+    //(type (;10;) (func (param i32 i32 i32 i32) (result i32)))
+    //(type (;97;) (func (param i32 i32 i32 i32 i32 i64) (result i32)))
+
+    //
+    let wat = r#"
+   (module
+       (func (export "dlopen") (param i32 i32) (result i32)
+           i32.const 0
+       )
+   )
+   "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
+
+    //
+    let wat = r#"
+       (module
+           (func (export "dlsym") (param i32 i32) (result i32)
+               i32.const 0
+           )
+       )
+       "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
+
+    //
+    let wat = r#"
+   (module
+       (func (export "open") (param i32 i32 i32) (result i32)
+           i32.const 0
+       )
+   )
+   "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
+
+    //
+    let wat = r#"
+   (module
+       (func (export "mmap") (param i32 i32 i32 i32 i32 i64) (result i32)
+           i32.const 0
+       )
+   )
+   "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
+
+    //
+    let wat = r#"
+   (module
+       (func (export "munmap") (param i32 i32) (result i32)
+           i32.const 0
+       )
+   )
+   "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
+
+    //
+    let wat = r#"
+   (module
+       (func (export "__sys_fstat64") (param i32 i32) (result i32)
+           i32.const 0
+       )
+   )
+   "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
+
+    //
+    let wat = r#"
+    (module
+        (func (export "__sys_stat64") (param i32 i32) (result i32)
+            i32.const 0
+        )
+    )
+    "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
+
     Ok(())
 }
