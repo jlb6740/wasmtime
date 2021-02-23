@@ -469,8 +469,20 @@ fn populate_with_export_hacks(linker: &mut Linker) -> Result<()> {
     //(type (;2;) (func (param i32 i32) (result i32)))
     //(type (;10;) (func (param i32 i32 i32 i32) (result i32)))
     //(type (;97;) (func (param i32 i32 i32 i32 i32 i64) (result i32)))
+    //(import "env" "longjmp" (func (;1;) (type 7)))
+    //(import "env" "setjmp" (func (;2;) (type 6)))
 
-    //
+    let wat = r#"
+   (module
+       (func (export "__munmap") (param i32 i32) (result i32)
+           i32.const 0
+       )
+   )
+   "#;
+    let module = Module::new(linker.store().engine(), wat).unwrap();
+    let instance = linker.instantiate(&module).unwrap();
+    linker.instance("env", &instance).unwrap();
+
     let wat = r#"
    (module
        (func (export "dlopen") (param i32 i32) (result i32)
