@@ -593,6 +593,7 @@ pub enum SseOpcode {
     Pmovzxwd,
     Pmovzxwq,
     Pmovzxdq,
+    Pmulhrsw,
     Pmulld,
     Pmullw,
     Pmuludq,
@@ -776,6 +777,7 @@ impl SseOpcode {
             | SseOpcode::Pabsw
             | SseOpcode::Pabsd
             | SseOpcode::Palignr
+            | SseOpcode::Pmulhrsw
             | SseOpcode::Pshufb => SSSE3,
 
             SseOpcode::Blendvpd
@@ -953,6 +955,7 @@ impl fmt::Debug for SseOpcode {
             SseOpcode::Pmovzxwd => "pmovzxwd",
             SseOpcode::Pmovzxwq => "pmovzxwq",
             SseOpcode::Pmovzxdq => "pmovzxdq",
+            SseOpcode::Pmulhrsw => "pmulhrsw",
             SseOpcode::Pmulld => "pmulld",
             SseOpcode::Pmullw => "pmullw",
             SseOpcode::Pmuludq => "pmuludq",
