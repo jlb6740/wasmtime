@@ -12,6 +12,7 @@
     1. _Sumbit a PR to add your announcement here_
 1. Other agenda items
     1. _Sumbit a PR to add your item here_
+    Bug scrub - Maybe this belongs as a Wasmtime open but there are 369 Wasmtime issues dating back to 2016. Surely many are cranelift specific. Many are bugs likely in code that no longer exists. What's the best way to scrub these?
 
 ## Notes
 
