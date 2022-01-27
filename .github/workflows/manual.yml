@@ -13,7 +13,7 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-      - name: Download sightglass
+      #- name: Download sightglass
       - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
       - run: ls -l
       - run: pwd
