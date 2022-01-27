@@ -21,10 +21,10 @@ jobs:
     # Inputs the workflow accepts.
     steps:
       - run: echo "This job is now running on a ${{ runner.os }} self-hosted server!"
-      #- name: Setup Rust Toolchain
-      #  uses: actions-rs/toolchain@v1
-      #  with:
-      #    toolchain: stable
+      - name: Setup Rust Toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
       #- name: Build Sightglass ${{env.SG_COMMIT}}"
       #  run: |
       #    cd ../ && ls -l && rm -rf ./sightglass
