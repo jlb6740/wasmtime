@@ -33,7 +33,7 @@ jobs:
       - uses: actions-rs/checkout@v2
         with: 
           submodules: true
-        run: cargo build
+      - run: cargo build
         
         
 
