@@ -21,20 +21,20 @@ jobs:
     # Inputs the workflow accepts.
     steps:
       - run: echo "This job is now running on a ${{ runner.os }} self-hosted server!"
-      - name: Setup Rust Toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-      - name: Build Sightglass ${{env.SG_COMMIT}}"
-        run: |
-          cd ../ && ls -l && rm -rf ./sightglass
-          git clone https://github.com/bytecodealliance/sightglass.git && cd ./sightglass
-          git checkout 649509c
-          cargo build
+      #- name: Setup Rust Toolchain
+      #  uses: actions-rs/toolchain@v1
+      #  with:
+      #    toolchain: stable
+      #- name: Build Sightglass ${{env.SG_COMMIT}}"
+      #  run: |
+      #    cd ../ && ls -l && rm -rf ./sightglass
+      #    git clone https://github.com/bytecodealliance/sightglass.git && cd ./sightglass
+      #    git checkout 649509c
+      #    cargo build
       - uses: actions/checkout@v2
         with: 
           submodules: true
-          path: ../wasmtime_commit
+          path: wasmtime_commit
       - run: echo "The name of your commit branch is ${{ github.ref }} and your commit repository is ${{ github.repository }}."
       - name: Build Commit ${{ github.ref }}
         run: |
@@ -46,7 +46,7 @@ jobs:
         with:
           ref: 'main'
           submodules: true
-          path: ../wasmtime_main
+          path: wasmtime_main
       - name: Build Main
         run: |
           ls -l && pwd
