@@ -20,10 +20,10 @@ jobs:
       - run: hostname
       - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
       - run: echo "🔎 The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
-      - run: rm -rf sightglass
-      - run: git clone https://github.com/bytecodealliance/sightglass.git
+      #- run: rm -rf sightglass
+      #- run: git clone https://github.com/bytecodealliance/sightglass.git
       #- name: Compile Sightglass
       #- working-directory: ./app
-      - run: git checkout 649509c
-      - run: cargo build
+      #- run: git checkout 649509c
+      #- run: cargo build
 
