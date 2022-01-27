@@ -1,12 +1,13 @@
-# This is a basic workflow that is manually triggered
+# This is a workflow triggered by PR or triggered manually
+# Runs quick performance tests and reports the comparison against HEAD
 
-name: Manual workflow
+name: "Performance Testing"
 
 # Controls when the action will run. Workflow runs when manually triggered using the UI
 # or API.
 on: [push]
 jobs:
-  Sightglass:
+  Performance:
     runs-on: self-hosted
     # Inputs the workflow accepts.
     steps:
