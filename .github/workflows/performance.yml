@@ -17,10 +17,11 @@ jobs:
     runs-on: self-hosted
     # Inputs the workflow accepts.
     steps:
+      - working-directory: ./sightglass
+        run: ls -l
       - uses: actions-rs/toolchain@v1 
         with:
           toolchain: stable
-        working-directory: ./sightglass
       - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
       - run: ls -l
       - run: pwd
