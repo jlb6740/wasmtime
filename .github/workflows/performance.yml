@@ -25,7 +25,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-      - name: Build Sightglass ${{env.SG_COMMIT}}"
+      - name: Build sightglass commit ${{env.SG_COMMIT}}"
         run: |
           cd ../ && ls -l && rm -rf ./sightglass
           git clone https://github.com/bytecodealliance/sightglass.git && cd ./sightglass
@@ -55,6 +55,10 @@ jobs:
           git status
           cargo build --release -p wasmtime-bench-api
           cp target/release/libwasmtime_bench_api.so /tmp/wasmtime_main.so
+      - name: Run performance tests
+        working-directory: ../sightglass
+        run: |
+          pwd && ls -l
     #  - uses: actions-rs/toolchain@v1 
     #    with:
     #      toolchain: stable
