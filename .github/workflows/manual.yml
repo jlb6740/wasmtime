@@ -23,7 +23,7 @@ jobs:
       - run: rm -rf sightglass
       - run: git clone https://github.com/bytecodealliance/sightglass.git
       - name: Compile Sightglass
-        working-directory: ./app
-        run: git checkout 649509c
+      - working-directory: ./app
+      - run: git checkout 649509c
       - run: cargo build
 
