@@ -37,7 +37,7 @@ jobs:
           path: wasmtime_commit
       - run: echo "The name of your commit branch is ${{ github.ref }} and your commit repository is ${{ github.repository }}."
       - name: Build ${{ github.ref }}
-        working-directory: ./wasmtime_main
+        working-directory: ./wasmtime_commit
         run: |
           ls -l && pwd
           git status
