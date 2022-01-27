@@ -61,7 +61,7 @@ jobs:
           --iterations-per-process 3 \
           --engine /tmp/wasmtime_main.so \
           --engine /tmp/wasmtime_commit.so \
-          -- benchmarks-next/*/benchmark.wasm
+          -- benchmarks-next/blake3-scalar/benchmark.wasm
     #  - uses: actions-rs/toolchain@v1 
     #    with:
     #      toolchain: stable
