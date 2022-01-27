@@ -20,6 +20,7 @@ jobs:
     runs-on: self-hosted
     # Inputs the workflow accepts.
     steps:
+      - run: echo "This job is now running on a ${{ runner.os }} self-hosted server!"
       - name: Setup Rust Toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -33,6 +34,8 @@ jobs:
       - uses: actions/checkout@v2
         with: 
           submodules: true
+          path: wasmtime_commit
+      - run: echo "The name of your commit branch is ${{ github.ref }} and your commit repository is ${{ github.repository }}."
       - name: Build Commit ${{ github.ref }}
         run: |
           ls -l && pwd
@@ -43,7 +46,8 @@ jobs:
         with:
           ref: 'main'
           submodules: true
-      - name: Build Commit
+          path: wasmtime_main
+      - name: Build Main
         run: |
           ls -l && pwd
           git status
@@ -56,9 +60,9 @@ jobs:
      # - run: | 
      #        ls -l
      #        pwd
-      - run: hostname
-      - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
-      - run: echo "🔎 The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
+      #- run: hostname
+     # - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
+     # - run: echo "🔎 The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
       #- run: rm -rf sightglass
       #- run: git clone https://github.com/bytecodealliance/sightglass.git
       #- name: Checkout 649509c
