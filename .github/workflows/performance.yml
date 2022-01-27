@@ -18,7 +18,9 @@ jobs:
     # Inputs the workflow accepts.
     steps:
       - name: Build sightglass
-        uses: actions-rs/toolchain@v1 
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
       - run: | 
           ls -l && rm -rf ./sightglass
           git clone https://github.com/bytecodealliance/sightglass.git && cd ./sightglass
