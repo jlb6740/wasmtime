@@ -20,7 +20,7 @@ jobs:
       - uses: actions-rs/toolchain@v1 
         with:
           toolchain: stable
-      - working-directory: ./sightglass
+        working-directory: ./sightglass
       - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
       - run: ls -l
       - run: pwd
