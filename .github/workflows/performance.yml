@@ -5,10 +5,15 @@ name: "Performance Testing"
 
 # Controls when the action will run. Workflow runs when manually triggered using the UI
 # or API.
-on: [push]
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+    
 jobs:
-  Performance:
-    name: Performance
+  Performance_x86-64:
+    name: Performance x86-64
     runs-on: self-hosted
     # Inputs the workflow accepts.
     steps:
