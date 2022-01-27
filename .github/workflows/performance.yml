@@ -29,8 +29,8 @@ jobs:
       - name: Build sightglass
         working-directory: ./sightglass
         run: cargo build
-      - run ls -l
-      - run pwd
+      - run: ls -l
+      - run: pwd
       #- name: Build PR 
       #  uses: actions/checkout@v2
       #  with: 
