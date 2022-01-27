@@ -28,4 +28,9 @@ jobs:
       - name: Build sightglass
         working-directory: ./sightglass
         run: cargo build
+      - name: Build PR 
+        working-directory: HEAD
+        uses: actions-rs/checkout@v2
+        
+        
 
