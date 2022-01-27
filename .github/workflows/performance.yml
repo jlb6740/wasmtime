@@ -1,5 +1,6 @@
 # This is a workflow triggered by PR or triggered manually
 # Runs quick performance tests and reports the comparison against HEAD
+# Test should take less than 10 minutes to run on current self-hosted devices
 name: "Performance Testing"
 
 # Controls when the action will run. 
@@ -30,7 +31,7 @@ jobs:
           cd ../ && ls -l && rm -rf ./sightglass
           git clone https://github.com/bytecodealliance/sightglass.git && cd ./sightglass
           git checkout 649509c
-          cargo build
+          cargo build --release
       - uses: actions/checkout@v2
         with: 
           submodules: true
@@ -59,6 +60,11 @@ jobs:
         working-directory: ../sightglass
         run: |
           pwd && ls -l
+          cargo run -- \
+          benchmark \
+          --engine /tmp/wasmtime_main.so \
+          --engine /tmp/wasmtime_commit.so \
+          -- benchmarks-next/*/benchmark.wasm
     #  - uses: actions-rs/toolchain@v1 
     #    with:
     #      toolchain: stable
