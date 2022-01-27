@@ -25,7 +25,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-      - name: Build Sightglass ${SG_COMMIT}
+      - name: Build Sightglass ${{env.SG_COMMIT}}"
         run: |
           cd ../ && ls -l && rm -rf ./sightglass
           git clone https://github.com/bytecodealliance/sightglass.git && cd ./sightglass
@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v2
         with: 
           submodules: true
-          path: wasmtime_commit
+          path: ../wasmtime_commit
       - run: echo "The name of your commit branch is ${{ github.ref }} and your commit repository is ${{ github.repository }}."
       - name: Build Commit ${{ github.ref }}
         run: |
@@ -46,7 +46,7 @@ jobs:
         with:
           ref: 'main'
           submodules: true
-          path: wasmtime_main
+          path: ../wasmtime_main
       - name: Build Main
         run: |
           ls -l && pwd
