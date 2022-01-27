@@ -8,13 +8,13 @@ name: "Performance Testing"
 on: [push]
 jobs:
   Performance:
+    name: Performance
     runs-on: self-hosted
     # Inputs the workflow accepts.
     steps:
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-      #- name: Download sightglass
       - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
       - run: ls -l
       - run: pwd
@@ -30,7 +30,7 @@ jobs:
         working-directory: ./sightglass
         run: cargo build
       - name: Build PR 
-        uses: actions-rs/checkout@v2
+      - uses: actions-rs/checkout@v2
         with: 
           submodules: true
         run: cargo build
