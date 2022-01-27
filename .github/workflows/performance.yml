@@ -40,8 +40,6 @@ jobs:
       - name: Build ${{ github.ref }}
         working-directory: ./wasmtime_commit
         run: |
-          ls -l && pwd
-          git status
           cargo build --release -p wasmtime-bench-api
           cp target/release/libwasmtime_bench_api.so /tmp/wasmtime_commit.so
       - uses: actions/checkout@v2
@@ -52,16 +50,15 @@ jobs:
       - name: Build Main
         working-directory: ./wasmtime_main
         run: |
-          ls -l && pwd
-          git status
           cargo build --release -p wasmtime-bench-api
           cp target/release/libwasmtime_bench_api.so /tmp/wasmtime_main.so
       - name: Run performance tests
         working-directory: ../sightglass
         run: |
-          pwd && ls -l
           cargo run -- \
           benchmark \
+          --processes 1 \
+          --iterations-per-process 3 \
           --engine /tmp/wasmtime_main.so \
           --engine /tmp/wasmtime_commit.so \
           -- benchmarks-next/*/benchmark.wasm
