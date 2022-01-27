@@ -25,20 +25,30 @@ jobs:
         with:
           toolchain: stable
       - name: Build Sightglass @$SG_COMMIT
-        run: | 
-          ls -l && rm -rf ./sightglass
+        run: |
+          cd ../ && ls -l && rm -rf ./sightglass
           git clone https://github.com/bytecodealliance/sightglass.git && cd ./sightglass
           git checkout 649509c
           cargo build
       - uses: actions/checkout@v2
         with: 
           submodules: true
-      - name: Build Commit
+      - name: Build Commit ${{ github.ref }}
         run: |
           ls -l && pwd
           git status
           cargo build --release -p wasmtime-bench-api
           cp target/release/libwasmtime_bench_api.so /tmp/wasmtime_commit.so
+      - uses: actions/checkout@v2
+        with:
+          ref: 'main'
+          submodules: true
+      - name: Build Commit
+        run: |
+          ls -l && pwd
+          git status
+          cargo build --release -p wasmtime-bench-api
+          cp target/release/libwasmtime_bench_api.so /tmp/wasmtime_main.so
     #  - uses: actions-rs/toolchain@v1 
     #    with:
     #      toolchain: stable
