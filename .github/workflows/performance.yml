@@ -17,20 +17,23 @@ jobs:
     runs-on: self-hosted
     # Inputs the workflow accepts.
     steps:
-      - name: Build sightglass
+      - name: Setup rust toolchain
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-      - run: | 
+      - name: Build Sightglass
+        run: | 
           ls -l && rm -rf ./sightglass
           git clone https://github.com/bytecodealliance/sightglass.git && cd ./sightglass
           git checkout 649509c
           cargo build
-      - working-directory: ./sightglass
-        run: ls -l
-      - uses: actions-rs/toolchain@v1 
-        with:
-          toolchain: stable
+      - name: Build request
+        working-directory: ./sightglass
+        run: |
+          ls -l && pwd
+    #  - uses: actions-rs/toolchain@v1 
+    #    with:
+    #      toolchain: stable
      # - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
      # - run: | 
      #        ls -l
