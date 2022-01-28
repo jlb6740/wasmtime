@@ -101,27 +101,24 @@ jobs:
           body="${body//$'\r'/'%0D'}" 
           echo "::set-output name=body::$body"
 
-      - run: echo "${{ github.event_name }}"
-      - run: echo "${{ steps.fc.outputs.comment-id }} --  ${{ github.event.pull_request.number }} -- ${{ github.event.number }} -- ${{github.event.issue.number}}"
-
-      - name: Publish Results -- $${{ github.event_name }} -- ${{ steps.fc.outputs.comment-id }} --  ${{ github.event.pull_request.number }} -- ${{ github.event.number }} -- ${{github.event.issue.number}}
-        uses: peter-evans/create-or-update-comment@v1
-        with:
-          comment-id: ${{ steps.fc.outputs.comment-id }}
-          issue-number: 1
-          reactions: rocket
-          body: ${{ steps.get-comment-body.outputs.body }}
-
       - uses: jwalton/gh-find-current-pr@v1
         id: findPr
         with:
           # Can be "open", "closed", or "all".  Defaults to "open".
           state: open
-      # This will echo "Your PR is 7", or be skipped if there is no current PR.
-      - run: echo "Your PR is ${PR}"
+          
+      #- run: echo "Your PR is ${PR}"
+      #  if: success() && steps.findPr.outputs.number
+      #  env:
+      #    PR: ${{ steps.findPr.outputs.pr }}
+
+      - name: Publish Results
         if: success() && steps.findPr.outputs.number
-        env:
-          PR: ${{ steps.findPr.outputs.pr }}
+        uses: peter-evans/create-or-update-comment@v1
+        with:
+          issue-number: steps.findPr.outputs.number
+          reactions: rocket
+          body: ${{ steps.get-comment-body.outputs.body }}
 
 
  # Performance_Aarch64:
