@@ -7,7 +7,6 @@ name: "Performance Testing"
 # Workflow runs when manually triggered using the UI or API.
 on:
   push:
-   # branches: [ main ]
   pull_request:
     branches: [ main ]
     
@@ -78,11 +77,11 @@ jobs:
       - name: Comment on Results
         uses: peter-evans/create-or-update-comment@v1
         with:
-          comment-id: ${{ github.event.comment.id }}
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
           reactions: rocket
           body: ${{ steps.get-comment-body.outputs.body }}
-      #    name: Perf Comparison
-      #    reporter: jest-junit
+
 
  # Performance_Aarch64:
  #   name: Performance Aarch64
