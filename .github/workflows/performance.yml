@@ -21,7 +21,7 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     # Inputs the workflow accepts.
     steps:
-      - run: echo "This job is now running on a ${{ runner.os }} self-hosted server!"
+      - run: echo "This job is now running on a ${{ runner.os }} self-hosted server."
       - name: Setup Rust Toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -36,7 +36,8 @@ jobs:
         with: 
           submodules: true
           path: wasmtime_commit
-      - run: echo "The name of your commit branch is ${{ github.ref }} and your commit repository is ${{ github.repository }}."
+      - run: echo "This commit branch is ${{ github.ref }}." 
+      - run: echo "This commit repository is ${{ github.repository }}."
       - name: Build ${{ github.ref }}
         working-directory: ./wasmtime_commit
         run: |
@@ -62,14 +63,14 @@ jobs:
           --engine /tmp/wasmtime_main.so \
           --engine /tmp/wasmtime_commit.so \
           --output-format json \
-          --output-file results.json \
+          --output-file /tmp/results.json \
           -- benchmarks-next/blake3-scalar/benchmark.wasm
       - name: Publish Test Results
         uses: EnricoMi/publish-unit-test-result-action/composite@v1
         if: always()
         with:
           name: Perf Comparison
-          files: ./results.json
+          files: /tmp/results.json
 
  # Performance_Aarch64:
  #   name: Performance Aarch64
