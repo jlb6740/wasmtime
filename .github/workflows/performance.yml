@@ -66,7 +66,6 @@ jobs:
           --engine /tmp/wasmtime_commit.so \
           --output-format csv \
           --output-file /tmp/results.csv \
-          #--raw \
           -- benchmarks-next/blake3-scalar/benchmark.wasm
           #./target/release/sightglass-cli summarize --input-format csv  --output-format json -f /tmp/results.csv > /tmp/results.json
       #- name: Publish Test Results
