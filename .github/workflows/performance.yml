@@ -111,15 +111,6 @@ jobs:
           body="${body//$'\r'/'%0D'}" 
           echo "::set-output name=body::$body"
 
-      - id: get-comment-body2
-        name: Get Result 2
-        run: | 
-          body2="$(cat /tmp/results_cycles_summarized_pp_sorted.csv)"
-          body2="${body//'%'/'%25'}"
-          body2="${body//$'\n'/'%0A'}"
-          body2="${body//$'\r'/'%0D'}" 
-          echo "::set-output name=body::$body2"
-
       - name: Find PR
         uses: jwalton/gh-find-current-pr@v1
         id: findPr
@@ -133,6 +124,15 @@ jobs:
           issue-number: ${{ steps.findPr.outputs.pr }}
           reactions: rocket
           body: ${{ steps.get-comment-body.outputs.body }}
+
+      - id: get-comment-body2
+        name: Get Result 2
+        run: | 
+          body2="$(cat /tmp/results_cycles_summarized_pp_sorted2.csv)"
+          body2="${body2//'%'/'%25'}"
+          body2="${body2//$'\n'/'%0A'}"
+          body2="${body2//$'\r'/'%0D'}" 
+          echo "::set-output name=body2::$body2"
 
       - name: Publish Results 2
         uses: peter-evans/create-or-update-comment@v1
