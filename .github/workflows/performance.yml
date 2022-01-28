@@ -117,7 +117,8 @@ jobs:
       - name: Publish Results
         uses: peter-evans/create-or-update-comment@v1
         with:
-          issue-number: ${PR}
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          issue-number: ${{env.PR}}
           reactions: rocket
           body: ${{ steps.get-comment-body.outputs.body }}
 
