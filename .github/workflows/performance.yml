@@ -21,37 +21,44 @@ jobs:
     # Inputs the workflow accepts.
     steps:
       - run: echo "This job is now running on a ${{ runner.os }} self-hosted server."
+      
       - name: Setup Rust Toolchain
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
+          
       - name: Build sightglass commit ${{env.SG_COMMIT}}"
         run: |
           cd ../ && ls -l && rm -rf ./sightglass
           git clone https://github.com/bytecodealliance/sightglass.git && cd ./sightglass
           git checkout ${{env.SG_COMMIT}}
           cargo build --release
+          
       - name: Checkout ${{ github.ref }} from ${{ github.repository }}
         uses: actions/checkout@v2
         with: 
           submodules: true
           path: wasmtime_commit
+          
       - name: Build ${{ github.ref }}
         working-directory: ./wasmtime_commit
         run: |
           cargo build --release -p wasmtime-bench-api
           cp target/release/libwasmtime_bench_api.so /tmp/wasmtime_commit.so
+          
       - name: Checkout Main
         uses: actions/checkout@v2
         with:
           ref: 'main'
           submodules: true
           path: wasmtime_main
+          
       - name: Build Main
         working-directory: ./wasmtime_main
         run: |
           cargo build --release -p wasmtime-bench-api
           cp target/release/libwasmtime_bench_api.so /tmp/wasmtime_main.so
+          
       - name: Run performance tests
         working-directory: ../sightglass
         run: |
@@ -64,15 +71,31 @@ jobs:
           --output-format csv \
           --output-file /tmp/results.csv \
           -- benchmarks-next/blake3-scalar/benchmark.wasm
-          #./target/release/sightglass-cli summarize --input-format csv  --output-format json -f /tmp/results.csv > /tmp/results.json
+          ./target/release/sightglass-cli summarize --input-format csv  --output-format csv -f /tmp/results.csv > /tmp/results_summarized.csv
+
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+          
+      - name: Post Process Perf Results
+        run: |
+          pip3 install pandas
+          pip3 install numpy
+          grep -v "cycles" /tmp/results_summarized.csv > /tmp/results_cycles_summarized.csv
+          sed -i 's/\/tmp\/wasmtime_commit.so/patch/g' /tmp/results_cycles_summarized.csv
+          sed -i 's/\/tmp\/wasmtime_main.so/main/g' /tmp/results_cycles_summarized.csv
+          python3 -c "import pandas as pd; pp = pd.read_csv('/tmp/results_cycles_summarized.csv', usecols=['arch','engine','phase', 'mean'], header=0); pp_sorted = pp.sort_values('phase', ascending=True); print(pp_sorted.to_string(index=False));" > /tmp/results_cycles_summarized_pp_sorted.csv
+
       - id: get-comment-body
         run: | 
-          body="$(cat /tmp/results.csv)"
+          body="$(cat /tmp/results_cycles_summarized_pp_sorted.csv)"
           body="${body//'%'/'%25'}"
           body="${body//$'\n'/'%0A'}"
           body="${body//$'\r'/'%0D'}" 
           echo "::set-output name=body::$body"
-      - name: Comment on Results -- ${{ steps.fc.outputs.comment-id }} --  ${{ github.event.pull_request.number }}
+          
+      - name: Comment on Results -- ${{ steps.fc.outputs.comment-id }} --  ${{ github.event.pull_request.number }} -- ${{ github.event.number }}
         uses: peter-evans/create-or-update-comment@v1
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
