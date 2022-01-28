@@ -69,7 +69,7 @@ jobs:
         if: always()
         with:
           name: Perf Comparison
-          files: results.json
+          files: ./results.json
 
  # Performance_Aarch64:
  #   name: Performance Aarch64
