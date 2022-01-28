@@ -36,8 +36,6 @@ jobs:
         with: 
           submodules: true
           path: wasmtime_commit
-      #- run: echo "This commit branch is ${{ github.ref }}." 
-      #- run: echo "This commit repository is ${{ github.repository }}."
       - name: Build ${{ github.ref }}
         working-directory: ./wasmtime_commit
         run: |
@@ -74,11 +72,11 @@ jobs:
           body="${body//$'\n'/'%0A'}"
           body="${body//$'\r'/'%0D'}" 
           echo "::set-output name=body::$body"
-      - name: Comment on Results
+      - name: Comment on Results -- ${{ steps.fc.outputs.comment-id }} --  ${{ github.event.pull_request.number }}
         uses: peter-evans/create-or-update-comment@v1
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
-          issue-number: ${{ github.event.pull_request.number }}
+          issue-number: 1
           reactions: rocket
           body: ${{ steps.get-comment-body.outputs.body }}
 
