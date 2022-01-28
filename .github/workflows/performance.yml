@@ -18,7 +18,7 @@ env:
 jobs:
   Performance_x86-64:
     name: Performance x86-64
-    runs-on: [self-hosted, linux, x86-64]
+    runs-on: [self-hosted, linux, x64]
     # Inputs the workflow accepts.
     steps:
       - run: echo "This job is now running on a ${{ runner.os }} self-hosted server!"
