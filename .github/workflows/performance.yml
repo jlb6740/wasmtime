@@ -68,14 +68,16 @@ jobs:
           --output-file /tmp/results.csv \
           -- benchmarks-next/blake3-scalar/benchmark.wasm
           #./target/release/sightglass-cli summarize --input-format csv  --output-format json -f /tmp/results.csv > /tmp/results.json
+      - id: get-comment-body
+        run: | 
+          body= "$(cat /tmp/results.csv)"
+          echo "::set-output name=body::$body"
       - name: Comment on Results
         uses: peter-evans/create-or-update-comment@v1
-        if: success()
         with:
           comment-id: ${{ github.event.comment.id }}
           reactions: rocket
-          run: | 
-            cat /tmp/results.csv
+          body: ${{ steps.get-comment-body.outputs.body }}
       #    name: Perf Comparison
       #    reporter: jest-junit
 
