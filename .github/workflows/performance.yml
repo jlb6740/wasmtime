@@ -58,10 +58,18 @@ jobs:
           cargo run -- \
           benchmark \
           --processes 1 \
-          --iterations-per-process 3 \
+          --iterations-per-process 1 \
           --engine /tmp/wasmtime_main.so \
           --engine /tmp/wasmtime_commit.so \
+          --output-format json \
+          --out-file results.json
           -- benchmarks-next/blake3-scalar/benchmark.wasm
+      - name: Publish Test Results
+        uses: EnricoMi/publish-unit-test-result-action/composite@v1
+        if: always()
+        with:
+          name: Perf Comparison
+          files: results.json
     #  - uses: actions-rs/toolchain@v1 
     #    with:
     #      toolchain: stable
