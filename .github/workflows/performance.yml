@@ -99,7 +99,7 @@ jobs:
           sed -i 's/ \+/|/g' /tmp/results_cycles_summarized_pp_sorted2.csv
           sed -i -z 's/\n/|\n/g' /tmp/results_cycles_summarized_pp_sorted2.csv
           sed -i '2 i\ |-|-|-|-|' /tmp/results_cycles_summarized_pp_sorted2.csv
-          sed -i '1 i\ Performance results based on clockticks comparison (higher %change shows improvement):\n' /tmp/results_cycles_summarized_pp_sorted2.csv
+          sed -i '1 i\ Performance results based on clockticks comparison with main HEAD (higher %change shows improvement):\n' /tmp/results_cycles_summarized_pp_sorted2.csv
           sed -i '/main/d' /tmp/results_cycles_summarized_pp_sorted2.csv
           
       - id: get-comment-body
