@@ -62,7 +62,7 @@ jobs:
           --engine /tmp/wasmtime_main.so \
           --engine /tmp/wasmtime_commit.so \
           --output-format json \
-          --output-file results.json
+          --output-file results.json \
           -- benchmarks-next/blake3-scalar/benchmark.wasm
       - name: Publish Test Results
         uses: EnricoMi/publish-unit-test-result-action/composite@v1
