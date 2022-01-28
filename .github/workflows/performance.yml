@@ -59,7 +59,7 @@ jobs:
           cargo run -- \
           benchmark \
           --processes 1 \
-          --iterations-per-process 1 \
+          --iterations-per-process 2 \
           --engine /tmp/wasmtime_main.so \
           --engine /tmp/wasmtime_commit.so \
           --output-format json \
