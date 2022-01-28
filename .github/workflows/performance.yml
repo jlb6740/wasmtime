@@ -70,7 +70,10 @@ jobs:
           #./target/release/sightglass-cli summarize --input-format csv  --output-format json -f /tmp/results.csv > /tmp/results.json
       - id: get-comment-body
         run: | 
-          body="${cat /tmp/results.csv}"
+          body="$(cat /tmp/results.csv)"
+          body="${body//'%'/'%25'}"
+          body="${body//$'\n'/'%0A'}"
+          body="${body//$'\r'/'%0D'}" 
           echo "::set-output name=body::$body"
       - name: Comment on Results
         uses: peter-evans/create-or-update-comment@v1
