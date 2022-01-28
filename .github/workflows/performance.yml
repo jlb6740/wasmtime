@@ -69,13 +69,12 @@ jobs:
           #--raw \
           -- benchmarks-next/blake3-scalar/benchmark.wasm
           #./target/release/sightglass-cli summarize --input-format csv  --output-format json -f /tmp/results.csv > /tmp/results.json
-      - name: Publish Test Results
-        uses: dorny/test-reporter@v1
-        if: success()
-        with:
-          name: Perf Comparison
-          path: /tmp/results.json
-          reporter: jest-junit
+      #- name: Publish Test Results
+      #  uses: dorny/test-reporter@v1
+      #  if: success()
+      #  with:
+      #    name: Perf Comparison
+      #    reporter: jest-junit
 
  # Performance_Aarch64:
  #   name: Performance Aarch64
