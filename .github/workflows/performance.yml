@@ -32,18 +32,20 @@ jobs:
           git clone https://github.com/bytecodealliance/sightglass.git && cd ./sightglass
           git checkout ${{env.SG_COMMIT}}
           cargo build --release
-      - uses: actions/checkout@v2
+      - name: Checkout ${{ github.ref }} from ${{ github.repository }}
+        uses: actions/checkout@v2
         with: 
           submodules: true
           path: wasmtime_commit
-      - run: echo "This commit branch is ${{ github.ref }}." 
-      - run: echo "This commit repository is ${{ github.repository }}."
+      #- run: echo "This commit branch is ${{ github.ref }}." 
+      #- run: echo "This commit repository is ${{ github.repository }}."
       - name: Build ${{ github.ref }}
         working-directory: ./wasmtime_commit
         run: |
           cargo build --release -p wasmtime-bench-api
           cp target/release/libwasmtime_bench_api.so /tmp/wasmtime_commit.so
-      - uses: actions/checkout@v2
+      - name: Checkout Main
+        uses: actions/checkout@v2
         with:
           ref: 'main'
           submodules: true
@@ -64,9 +66,9 @@ jobs:
           --engine /tmp/wasmtime_commit.so \
           --output-format csv \
           --output-file /tmp/results.csv \
-          --raw \
+          #--raw \
           -- benchmarks-next/blake3-scalar/benchmark.wasm
-          ./target/release/sightglass-cli summarize --input-format csv  --output-format json -f /tmp/results.csv > /tmp/results.json
+          #./target/release/sightglass-cli summarize --input-format csv  --output-format json -f /tmp/results.csv > /tmp/results.json
       - name: Publish Test Results
         uses: dorny/test-reporter@v1
         if: success()
