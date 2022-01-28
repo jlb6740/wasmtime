@@ -107,13 +107,13 @@ jobs:
           # Can be "open", "closed", or "all".  Defaults to "open".
           state: open
           
-      #- run: echo "Your PR is ${PR}"
-      #  if: success() && steps.findPr.outputs.number
-      #  env:
-      #    PR: ${{ steps.findPr.outputs.pr }}
-
-      - name: Publish Results
+      - run: echo "Your PR is ${PR}"
         if: success() && steps.findPr.outputs.number
+        env:
+          PR: ${{ steps.findPr.outputs.pr }}
+
+      - if: success() && steps.findPr.outputs.number
+        name: Publish Results
         uses: peter-evans/create-or-update-comment@v1
         with:
           issue-number: steps.findPr.outputs.number
