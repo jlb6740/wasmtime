@@ -88,6 +88,7 @@ jobs:
           python3 -c "import pandas as pd; pp = pd.read_csv('/tmp/results_cycles_summarized.csv', usecols=['arch','engine','phase', 'mean'], header=0); pp_sorted = pp.sort_values('phase', ascending=True); print(pp_sorted.to_string(index=False));" > /tmp/results_cycles_summarized_pp_sorted.csv
 
       - id: get-comment-body
+        name: Get Result 
         run: | 
           body="$(cat /tmp/results_cycles_summarized_pp_sorted.csv)"
           body="${body//'%'/'%25'}"
@@ -95,7 +96,7 @@ jobs:
           body="${body//$'\r'/'%0D'}" 
           echo "::set-output name=body::$body"
           
-      - name: Comment on Results -- ${{ steps.fc.outputs.comment-id }} --  ${{ github.event.pull_request.number }} -- ${{ github.event.number }}
+      - name: Publish Results -- ${{ steps.fc.outputs.comment-id }} --  ${{ github.event.pull_request.number }} -- ${{ github.event.number }}
         uses: peter-evans/create-or-update-comment@v1
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
