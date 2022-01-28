@@ -90,7 +90,7 @@ jobs:
           sed -i 's/ \+/|/g' /tmp/results_cycles_summarized_pp_sorted.csv
           sed -i -z 's/\n/|\n/g' /tmp/results_cycles_summarized_pp_sorted.csv
           sed -i '2 i\ |-|-|-|-|' /tmp/results_cycles_summarized_pp_sorted.csv
-          sed -i '1 i\ Performance Results:\n' /tmp/results_cycles_summarized_pp_sorted.csv
+          sed -i '1 i\ Performance Results (lower is better):\n' /tmp/results_cycles_summarized_pp_sorted.csv
           
       - id: get-comment-body
         name: Get Result 
