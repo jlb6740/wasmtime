@@ -86,12 +86,12 @@ jobs:
           grep -v "cycles" /tmp/results_summarized.csv > /tmp/results_cycles_summarized.csv
           sed -i 's/\/tmp\/wasmtime_commit.so/patch/g' /tmp/results_cycles_summarized.csv
           sed -i 's/\/tmp\/wasmtime_main.so/main/g' /tmp/results_cycles_summarized.csv
+          python3 -c "import pandas as pd; pp = pd.read_csv('/tmp/results_cycles_summarized.csv', usecols=['arch','engine','phase', 'mean'], header=0); pp_sorted = pp.sort_values('phase', ascending=True); print(pp_sorted.to_string(index=False));" > /tmp/results_cycles_summarized_pp_sorted.csv
           sed -i 's/ \+/|/g' /tmp/results_cycles_summarized_pp_sorted.csv
           sed -i -z 's/\n/|\n/g' /tmp/results_cycles_summarized_pp_sorted.csv
           sed -i '2 i\ |-|-|-|-|' /tmp/results_cycles_summarized_pp_sorted.csv
           sed -i '1 i\ Performance Results:\n' /tmp/results_cycles_summarized_pp_sorted.csv
-          python3 -c "import pandas as pd; pp = pd.read_csv('/tmp/results_cycles_summarized.csv', usecols=['arch','engine','phase', 'mean'], header=0); pp_sorted = pp.sort_values('phase', ascending=True); print(pp_sorted.to_string(index=False));" > /tmp/results_cycles_summarized_pp_sorted.csv
-
+          
       - id: get-comment-body
         name: Get Result 
         run: | 
