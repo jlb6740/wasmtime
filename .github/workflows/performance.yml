@@ -100,8 +100,8 @@ jobs:
           body="${body//$'\n'/'%0A'}"
           body="${body//$'\r'/'%0D'}" 
           echo "::set-output name=body::$body"
-          
-      - name: Publish Results -- ${{ steps.fc.outputs.comment-id }} --  ${{ github.event.pull_request.number }} -- ${{ github.event.number }} -- ${{github.event.issue.number}}
+
+      - name: Publish Results -- $${{ github.event_name }} -- ${{ steps.fc.outputs.comment-id }} --  ${{ github.event.pull_request.number }} -- ${{ github.event.number }} -- ${{github.event.issue.number}}
         uses: peter-evans/create-or-update-comment@v1
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
