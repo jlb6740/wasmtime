@@ -91,7 +91,7 @@ jobs:
           sed -i 's/ \+/|/g' /tmp/results_cycles_summarized_pp_sorted.csv
           sed -i -z 's/\n/|\n/g' /tmp/results_cycles_summarized_pp_sorted.csv
           sed -i '2 i\ |-|-|-|-|' /tmp/results_cycles_summarized_pp_sorted.csv
-          sed -i '1 i\ Performance Results in clockticks (lower is better):\n' /tmp/results_cycles_summarized_pp_sorted.csv
+          sed -i '1 i\ Performance results in clockticks (lower is better):\n' /tmp/results_cycles_summarized_pp_sorted.csv
           
       - id: get-comment-body
         name: Get Result 
@@ -102,17 +102,18 @@ jobs:
           body="${body//$'\r'/'%0D'}" 
           echo "::set-output name=body::$body"
 
-      - uses: jwalton/gh-find-current-pr@v1
+      - name: Find PR
+        uses: jwalton/gh-find-current-pr@v1
         id: findPr
         with:
           # Can be "open", "closed", or "all".  Defaults to "open".
           state: open
-          
-     # - name: Get PR
-     #   run: echo "Your PR is ${PR}"
-     #   if: success() && steps.findPr.outputs.number
-     #   env:
-     #     PR: ${{ steps.findPr.outputs.pr }}
+  
+      - name: Find Comment
+        uses: peter-evans/find-comment@v1
+        id: fc
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
 
       - name: Publish Results
         uses: peter-evans/create-or-update-comment@v1
