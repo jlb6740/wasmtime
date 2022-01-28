@@ -108,17 +108,17 @@ jobs:
           # Can be "open", "closed", or "all".  Defaults to "open".
           state: open
           
-      - name: Get PR
-        run: echo "Your PR is ${PR}"
-        if: success() && steps.findPr.outputs.number
-        env:
-          PR: ${{ steps.findPr.outputs.pr }}
+     # - name: Get PR
+     #   run: echo "Your PR is ${PR}"
+     #   if: success() && steps.findPr.outputs.number
+     #   env:
+     #     PR: ${{ steps.findPr.outputs.pr }}
 
       - name: Publish Results
         uses: peter-evans/create-or-update-comment@v1
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
-          issue-number: ${{env.PR}}
+          issue-number: ${{ steps.findPr.outputs.pr }}
           reactions: rocket
           body: ${{ steps.get-comment-body.outputs.body }}
 
