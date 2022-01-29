@@ -6,9 +6,8 @@ name: "Performance Testing"
 # Controls when the action will run.
 # Workflow runs when manually triggered using the UI or API.
 on:
-  push:
-  pull_request:
-    branches: [ main ]
+  issue_comment:
+    types: [created, edited]
 
 # Env variables
 env:
@@ -16,6 +15,7 @@ env:
 
 jobs:
   Performance_x86-64:
+    if: contains(github.event.comment.body, '/bench_x64')
     name: Performance x86-64
     runs-on: [self-hosted, linux, x64]
     # Inputs the workflow accepts.
