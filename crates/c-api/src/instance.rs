@@ -1,139 +1,131 @@
-use crate::host_ref::HostRef;
-use crate::{wasm_extern_t, wasm_extern_vec_t, wasm_module_t, wasm_trap_t};
-use crate::{wasm_store_t, wasmtime_error_t, ExternHost};
-use anyhow::Result;
-use std::cell::RefCell;
-use std::ptr;
-use wasmtime::{Extern, Instance, Store, Trap};
+use crate::{
+    wasm_extern_t, wasm_extern_vec_t, wasm_module_t, wasm_store_t, wasm_trap_t, wasmtime_error_t,
+    wasmtime_extern_t, wasmtime_instancetype_t, wasmtime_module_t, CStoreContext, CStoreContextMut,
+    StoreRef,
+};
+use std::mem::MaybeUninit;
+use wasmtime::{Extern, Instance, Trap};
 
-#[repr(C)]
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct wasm_instance_t {
-    pub(crate) instance: HostRef<Instance>,
-    exports_cache: RefCell<Option<Vec<ExternHost>>>,
+    ext: wasm_extern_t,
 }
 
 wasmtime_c_api_macros::declare_ref!(wasm_instance_t);
 
 impl wasm_instance_t {
-    pub(crate) fn new(instance: Instance) -> wasm_instance_t {
-        let store = instance.store().clone();
+    pub(crate) fn new(store: StoreRef, instance: Instance) -> wasm_instance_t {
         wasm_instance_t {
-            instance: HostRef::new(&store, instance),
-            exports_cache: RefCell::new(None),
+            ext: wasm_extern_t {
+                store: store,
+                which: instance.into(),
+            },
         }
     }
 
-    fn externref(&self) -> wasmtime::ExternRef {
-        self.instance.clone().into()
+    pub(crate) fn try_from(e: &wasm_extern_t) -> Option<&wasm_instance_t> {
+        match &e.which {
+            Extern::Instance(_) => Some(unsafe { &*(e as *const _ as *const _) }),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn instance(&self) -> Instance {
+        match self.ext.which {
+            Extern::Instance(i) => i,
+            _ => unreachable!(),
+        }
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn wasm_instance_new(
-    store: &wasm_store_t,
+    store: &mut wasm_store_t,
     wasm_module: &wasm_module_t,
-    imports: *const Box<wasm_extern_t>,
+    imports: *const wasm_extern_vec_t,
     result: Option<&mut *mut wasm_trap_t>,
 ) -> Option<Box<wasm_instance_t>> {
-    let mut instance = ptr::null_mut();
-    let mut trap = ptr::null_mut();
-    let err = wasmtime_instance_new(
-        store,
-        wasm_module,
-        imports,
-        wasm_module.imports.len(),
-        &mut instance,
-        &mut trap,
-    );
-    match err {
-        Some(err) => {
-            assert!(trap.is_null());
-            assert!(instance.is_null());
-            if let Some(result) = result {
-                *result = Box::into_raw(err.to_trap(&store.store));
+    let imports = (*imports)
+        .as_slice()
+        .iter()
+        .filter_map(|import| match import {
+            Some(i) => Some(i.which.clone()),
+            None => None,
+        })
+        .collect::<Vec<_>>();
+    match Instance::new(store.store.context_mut(), wasm_module.module(), &imports) {
+        Ok(instance) => Some(Box::new(wasm_instance_t::new(
+            store.store.clone(),
+            instance,
+        ))),
+        Err(e) => {
+            if let Some(ptr) = result {
+                *ptr = Box::into_raw(Box::new(wasm_trap_t::new(e.into())));
             }
             None
-        }
-        None => {
-            if instance.is_null() {
-                assert!(!trap.is_null());
-                if let Some(result) = result {
-                    *result = trap;
-                } else {
-                    drop(Box::from_raw(trap))
-                }
-                None
-            } else {
-                assert!(trap.is_null());
-                Some(Box::from_raw(instance))
-            }
         }
     }
 }
 
 #[no_mangle]
+pub extern "C" fn wasm_instance_as_extern(m: &wasm_instance_t) -> &wasm_extern_t {
+    &m.ext
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wasm_instance_exports(
+    instance: &mut wasm_instance_t,
+    out: &mut wasm_extern_vec_t,
+) {
+    let store = instance.ext.store.clone();
+    out.set_buffer(
+        instance
+            .instance()
+            .exports(instance.ext.store.context_mut())
+            .map(|e| {
+                Some(Box::new(wasm_extern_t {
+                    which: e.into_extern(),
+                    store: store.clone(),
+                }))
+            })
+            .collect(),
+    );
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn wasmtime_instance_new(
-    store: &wasm_store_t,
-    module: &wasm_module_t,
-    imports: *const Box<wasm_extern_t>,
-    num_imports: usize,
-    instance_ptr: &mut *mut wasm_instance_t,
+    store: CStoreContextMut<'_>,
+    module: &wasmtime_module_t,
+    imports: *const wasmtime_extern_t,
+    nimports: usize,
+    instance: &mut Instance,
     trap_ptr: &mut *mut wasm_trap_t,
 ) -> Option<Box<wasmtime_error_t>> {
-    _wasmtime_instance_new(
-        store,
-        module,
-        std::slice::from_raw_parts(imports, num_imports),
-        instance_ptr,
-        trap_ptr,
-    )
-}
-
-fn _wasmtime_instance_new(
-    store: &wasm_store_t,
-    module: &wasm_module_t,
-    imports: &[Box<wasm_extern_t>],
-    instance_ptr: &mut *mut wasm_instance_t,
-    trap_ptr: &mut *mut wasm_trap_t,
-) -> Option<Box<wasmtime_error_t>> {
-    let store = &store.store;
-    let imports = imports
+    let imports = crate::slice_from_raw_parts(imports, nimports)
         .iter()
-        .map(|import| match &import.which {
-            ExternHost::Func(e) => Extern::Func(e.borrow().clone()),
-            ExternHost::Table(e) => Extern::Table(e.borrow().clone()),
-            ExternHost::Global(e) => Extern::Global(e.borrow().clone()),
-            ExternHost::Memory(e) => Extern::Memory(e.borrow().clone()),
-        })
+        .map(|i| i.to_extern())
         .collect::<Vec<_>>();
-    let module = &module.module.borrow();
     handle_instantiate(
-        store,
-        Instance::new(store, module, &imports),
-        instance_ptr,
+        Instance::new(store, &module.module, &imports),
+        instance,
         trap_ptr,
     )
 }
 
-pub fn handle_instantiate(
-    store: &Store,
-    instance: Result<Instance>,
-    instance_ptr: &mut *mut wasm_instance_t,
+pub(crate) fn handle_instantiate(
+    instance: anyhow::Result<Instance>,
+    instance_ptr: &mut Instance,
     trap_ptr: &mut *mut wasm_trap_t,
 ) -> Option<Box<wasmtime_error_t>> {
-    fn write<T>(ptr: &mut *mut T, val: T) {
-        *ptr = Box::into_raw(Box::new(val))
-    }
-
     match instance {
-        Ok(instance) => {
-            write(instance_ptr, wasm_instance_t::new(instance));
+        Ok(i) => {
+            *instance_ptr = i;
             None
         }
         Err(e) => match e.downcast::<Trap>() {
             Ok(trap) => {
-                write(trap_ptr, wasm_trap_t::new(store, trap));
+                *trap_ptr = Box::into_raw(Box::new(wasm_trap_t::new(trap)));
                 None
             }
             Err(e) => Some(Box::new(e.into())),
@@ -142,24 +134,51 @@ pub fn handle_instantiate(
 }
 
 #[no_mangle]
-pub extern "C" fn wasm_instance_exports(instance: &wasm_instance_t, out: &mut wasm_extern_vec_t) {
-    let mut cache = instance.exports_cache.borrow_mut();
-    let exports = cache.get_or_insert_with(|| {
-        let instance = &instance.instance.borrow();
-        instance
-            .exports()
-            .map(|e| match e.into_extern() {
-                Extern::Func(f) => ExternHost::Func(HostRef::new(instance.store(), f)),
-                Extern::Global(f) => ExternHost::Global(HostRef::new(instance.store(), f)),
-                Extern::Memory(f) => ExternHost::Memory(HostRef::new(instance.store(), f)),
-                Extern::Table(f) => ExternHost::Table(HostRef::new(instance.store(), f)),
-            })
-            .collect()
-    });
-    let mut buffer = Vec::with_capacity(exports.len());
-    for e in exports {
-        let ext = Box::new(wasm_extern_t { which: e.clone() });
-        buffer.push(Some(ext));
+pub extern "C" fn wasmtime_instance_type(
+    store: CStoreContext<'_>,
+    instance: &Instance,
+) -> Box<wasmtime_instancetype_t> {
+    Box::new(wasmtime_instancetype_t::new(instance.ty(store)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wasmtime_instance_export_get(
+    store: CStoreContextMut<'_>,
+    instance: &Instance,
+    name: *const u8,
+    name_len: usize,
+    item: &mut MaybeUninit<wasmtime_extern_t>,
+) -> bool {
+    let name = crate::slice_from_raw_parts(name, name_len);
+    let name = match std::str::from_utf8(name) {
+        Ok(name) => name,
+        Err(_) => return false,
+    };
+    match instance.get_export(store, name) {
+        Some(e) => {
+            crate::initialize(item, e.into());
+            true
+        }
+        None => false,
     }
-    out.set_buffer(buffer);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wasmtime_instance_export_nth(
+    store: CStoreContextMut<'_>,
+    instance: &Instance,
+    index: usize,
+    name_ptr: &mut *const u8,
+    name_len: &mut usize,
+    item: &mut MaybeUninit<wasmtime_extern_t>,
+) -> bool {
+    match instance.exports(store).nth(index) {
+        Some(e) => {
+            *name_ptr = e.name().as_ptr();
+            *name_len = e.name().len();
+            crate::initialize(item, e.into_extern().into());
+            true
+        }
+        None => false,
+    }
 }

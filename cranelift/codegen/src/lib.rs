@@ -31,8 +31,7 @@
         clippy::float_arithmetic,
         clippy::mut_mut,
         clippy::nonminimal_bool,
-        clippy::option_map_unwrap_or,
-        clippy::option_map_unwrap_or_else,
+        clippy::map_unwrap_or,
         clippy::unicode_not_nfc,
         clippy::use_self
     )
@@ -60,24 +59,28 @@ use hashbrown::{hash_map, HashMap, HashSet};
 use std::collections::{hash_map, HashMap, HashSet};
 
 pub use crate::context::Context;
-pub use crate::legalizer::legalize_function;
 pub use crate::value_label::{ValueLabelsRanges, ValueLocRange};
 pub use crate::verifier::verify_function;
 pub use crate::write::write_function;
 
 pub use cranelift_bforest as bforest;
 pub use cranelift_entity as entity;
+#[cfg(feature = "unwind")]
+pub use gimli;
+
+#[macro_use]
+mod machinst;
 
 pub mod binemit;
 pub mod cfg_printer;
 pub mod cursor;
+pub mod data_value;
 pub mod dbg;
 pub mod dominator_tree;
 pub mod flowgraph;
 pub mod ir;
 pub mod isa;
 pub mod loop_analysis;
-pub mod machinst;
 pub mod print_errors;
 pub mod settings;
 pub mod timing;
@@ -85,8 +88,9 @@ pub mod verifier;
 pub mod write;
 
 pub use crate::entity::packed_option;
+pub use crate::machinst::buffer::{MachCallSite, MachReloc, MachSrcLoc, MachStackMap, MachTrap};
+pub use crate::machinst::TextSectionBuilder;
 
-mod abi;
 mod bitset;
 mod constant_hash;
 mod context;
@@ -97,26 +101,19 @@ mod inst_predicates;
 mod iterators;
 mod legalizer;
 mod licm;
+mod log;
 mod nan_canonicalization;
-mod partition_slice;
-mod postopt;
-mod predicates;
-mod redundant_reload_remover;
-mod regalloc;
 mod remove_constant_phis;
 mod result;
 mod scoped_hash_map;
 mod simple_gvn;
 mod simple_preopt;
-mod stack_layout;
-mod topo_order;
 mod unreachable_code;
 mod value_label;
 
-#[cfg(feature = "enable-peepmatic")]
-mod peepmatic;
+#[cfg(feature = "souper-harvest")]
+mod souper_harvest;
 
 pub use crate::result::{CodegenError, CodegenResult};
 
-/// Version number of this crate.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+include!(concat!(env!("OUT_DIR"), "/version.rs"));

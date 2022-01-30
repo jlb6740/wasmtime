@@ -1,29 +1,48 @@
 //! CLI tool to interpret Cranelift IR files.
 
 use crate::utils::iterate_files;
-use cranelift_interpreter::environment::Environment;
-use cranelift_interpreter::interpreter::{ControlFlow, Interpreter};
+use cranelift_interpreter::environment::FunctionStore;
+use cranelift_interpreter::interpreter::{Interpreter, InterpreterState};
+use cranelift_interpreter::step::ControlFlow;
 use cranelift_reader::{parse_run_command, parse_test, ParseError, ParseOptions};
-use log::debug;
 use std::path::PathBuf;
 use std::{fs, io};
+use structopt::StructOpt;
 use thiserror::Error;
 
+/// Interpret clif code
+#[derive(StructOpt)]
+pub struct Options {
+    /// Specify an input file to be used. Use '-' for stdin.
+    #[structopt(required(true), parse(from_os_str))]
+    files: Vec<PathBuf>,
+
+    /// Enable debug output on stderr/stdout
+    #[structopt(short = "d")]
+    debug: bool,
+
+    /// Be more verbose
+    #[structopt(short = "v", long = "verbose")]
+    verbose: bool,
+}
+
 /// Run files through the Cranelift interpreter, interpreting any functions with annotations.
-pub fn run(files: Vec<String>, flag_print: bool) -> Result<(), String> {
+pub fn run(options: &Options) -> anyhow::Result<()> {
+    crate::handle_debug_flag(options.debug);
+
     let mut total = 0;
     let mut errors = 0;
-    for file in iterate_files(files) {
+    for file in iterate_files(&options.files) {
         total += 1;
-        let runner = FileInterpreter::from_path(file).map_err(|e| e.to_string())?;
+        let runner = FileInterpreter::from_path(file)?;
         match runner.run() {
             Ok(_) => {
-                if flag_print {
+                if options.verbose {
                     println!("{}", runner.path());
                 }
             }
             Err(e) => {
-                if flag_print {
+                if options.verbose {
                     println!("{}: {}", runner.path(), e.to_string());
                 }
                 errors += 1;
@@ -31,7 +50,7 @@ pub fn run(files: Vec<String>, flag_print: bool) -> Result<(), String> {
         }
     }
 
-    if flag_print {
+    if options.verbose {
         match total {
             0 => println!("0 files"),
             1 => println!("1 file"),
@@ -41,8 +60,8 @@ pub fn run(files: Vec<String>, flag_print: bool) -> Result<(), String> {
 
     match errors {
         0 => Ok(()),
-        1 => Err(String::from("1 failure")),
-        n => Err(format!("{} failures", n)),
+        1 => anyhow::bail!("1 failure"),
+        n => anyhow::bail!("{} failures", n),
     }
 }
 
@@ -56,7 +75,7 @@ impl FileInterpreter {
     /// Construct a file runner from a CLIF file path.
     pub fn from_path(path: impl Into<PathBuf>) -> Result<Self, io::Error> {
         let path = path.into();
-        debug!("New file runner from path: {}:", path.to_string_lossy());
+        log::trace!("New file runner from path: {}:", path.to_string_lossy());
         let contents = fs::read_to_string(&path)?;
         Ok(Self {
             path: Some(path),
@@ -67,7 +86,7 @@ impl FileInterpreter {
     /// Construct a file runner from a CLIF code string. Currently only used for testing.
     #[cfg(test)]
     pub fn from_inline_code(contents: String) -> Self {
-        debug!("New file runner from inline code: {}:", &contents[..20]);
+        log::trace!("New file runner from inline code: {}:", &contents[..20]);
         Self {
             path: None,
             contents,
@@ -90,10 +109,10 @@ impl FileInterpreter {
             .map_err(|e| FileInterpreterFailure::ParsingClif(self.path(), e))?;
 
         // collect functions
-        let mut env = Environment::default();
+        let mut env = FunctionStore::default();
         let mut commands = vec![];
-        for (func, details) in test.functions.into_iter() {
-            for comment in details.comments {
+        for (func, details) in test.functions.iter() {
+            for comment in &details.comments {
                 if let Some(command) = parse_run_command(comment.text, &func.signature)
                     .map_err(|e| FileInterpreterFailure::ParsingClif(self.path(), e))?
                 {
@@ -105,14 +124,14 @@ impl FileInterpreter {
         }
 
         // Run assertion commands
-        let interpreter = Interpreter::new(env);
         for command in commands {
             command
                 .run(|func_name, args| {
                     // Because we have stored function names with a leading %, we need to re-add it.
                     let func_name = &format!("%{}", func_name);
-                    match interpreter.call_by_name(func_name, args) {
-                        Ok(ControlFlow::Return(results)) => Ok(results),
+                    let state = InterpreterState::default().with_function_store(env.clone());
+                    match Interpreter::new(state).call_by_name(func_name, args) {
+                        Ok(ControlFlow::Return(results)) => Ok(results.to_vec()),
                         Ok(_) => panic!("Unexpected returned control flow--this is likely a bug."),
                         Err(t) => Err(t.to_string()),
                     }
@@ -158,6 +177,11 @@ mod test {
 
     #[test]
     fn filetests() {
-        run(vec!["../filetests/filetests/interpreter".to_string()], true).unwrap()
+        run(&Options {
+            files: vec![PathBuf::from("../filetests/filetests/interpreter")],
+            debug: true,
+            verbose: true,
+        })
+        .unwrap()
     }
 }

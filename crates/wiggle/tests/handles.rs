@@ -5,17 +5,16 @@ use wiggle_test::{impl_errno, HostMemory, MemArea, WasiCtx};
 const FD_VAL: u32 = 123;
 
 wiggle::from_witx!({
-    witx: ["tests/handles.witx"],
-    ctx: WasiCtx,
+    witx: ["$CARGO_MANIFEST_DIR/tests/handles.witx"],
 });
 
-impl_errno!(types::Errno, types::GuestErrorConversion);
+impl_errno!(types::Errno);
 
 impl<'a> handle_examples::HandleExamples for WasiCtx<'a> {
-    fn fd_create(&self) -> Result<types::Fd, types::Errno> {
+    fn fd_create(&mut self) -> Result<types::Fd, types::Errno> {
         Ok(types::Fd::from(FD_VAL))
     }
-    fn fd_consume(&self, fd: types::Fd) -> Result<(), types::Errno> {
+    fn fd_consume(&mut self, fd: types::Fd) -> Result<(), types::Errno> {
         println!("FD_CONSUME {}", fd);
         if fd == types::Fd::from(FD_VAL) {
             Ok(())
@@ -32,12 +31,12 @@ struct HandleExercise {
 
 impl HandleExercise {
     pub fn test(&self) {
-        let ctx = WasiCtx::new();
+        let mut ctx = WasiCtx::new();
         let host_memory = HostMemory::new();
 
-        let e = handle_examples::fd_create(&ctx, &host_memory, self.return_loc.ptr as i32);
+        let e = handle_examples::fd_create(&mut ctx, &host_memory, self.return_loc.ptr as i32);
 
-        assert_eq!(e, types::Errno::Ok.into(), "fd_create error");
+        assert_eq!(e, Ok(types::Errno::Ok as i32), "fd_create error");
 
         let h_got: u32 = host_memory
             .ptr(self.return_loc.ptr)
@@ -46,15 +45,15 @@ impl HandleExercise {
 
         assert_eq!(h_got, 123, "fd_create return val");
 
-        let e = handle_examples::fd_consume(&ctx, &host_memory, h_got as i32);
+        let e = handle_examples::fd_consume(&mut ctx, &host_memory, h_got as i32);
 
-        assert_eq!(e, types::Errno::Ok.into(), "fd_consume error");
+        assert_eq!(e, Ok(types::Errno::Ok as i32), "fd_consume error");
 
-        let e = handle_examples::fd_consume(&ctx, &host_memory, h_got as i32 + 1);
+        let e = handle_examples::fd_consume(&mut ctx, &host_memory, h_got as i32 + 1);
 
         assert_eq!(
             e,
-            types::Errno::InvalidArg.into(),
+            Ok(types::Errno::InvalidArg as i32),
             "fd_consume invalid error"
         );
     }

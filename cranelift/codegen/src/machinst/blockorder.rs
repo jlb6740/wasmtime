@@ -75,7 +75,6 @@ use crate::ir::{Block, Function, Inst, Opcode};
 use crate::machinst::lower::visit_block_succs;
 use crate::machinst::*;
 
-use log::debug;
 use smallvec::SmallVec;
 
 /// Mapping from CLIF BBs to VCode BBs.
@@ -87,6 +86,7 @@ pub struct BlockLoweringOrder {
     lowered_order: Vec<LoweredBlock>,
     /// Successors for all lowered blocks, in one serialized vector. Indexed by
     /// the ranges in `lowered_succ_ranges`.
+    #[allow(dead_code)]
     lowered_succs: Vec<(Inst, LoweredBlock)>,
     /// BlockIndex values for successors for all lowered blocks, in the same
     /// order as `lowered_succs`.
@@ -97,7 +97,15 @@ pub struct BlockLoweringOrder {
     /// Mapping from CLIF BB to BlockIndex (index in lowered order). Note that
     /// some CLIF BBs may not be lowered; in particular, we skip unreachable
     /// blocks.
+    #[allow(dead_code)]
     orig_map: SecondaryMap<Block, Option<BlockIndex>>,
+    /// Cold blocks. These blocks are not reordered in the
+    /// `lowered_order` above; the lowered order must respect RPO
+    /// (uses after defs) in order for lowering to be
+    /// correct. Instead, this set is used to provide `is_cold()`,
+    /// which is used by VCode emission to sink the blocks at the last
+    /// moment (when we actually emit bytes into the MachBuffer).
+    cold_blocks: FxHashSet<BlockIndex>,
 }
 
 /// The origin of a block in the lowered block-order: either an original CLIF
@@ -192,7 +200,7 @@ impl LoweredBlock {
 impl BlockLoweringOrder {
     /// Compute and return a lowered block order for `f`.
     pub fn new(f: &Function) -> BlockLoweringOrder {
-        debug!("BlockLoweringOrder: function body {:?}", f);
+        log::trace!("BlockLoweringOrder: function body {:?}", f);
 
         // Step 1: compute the in-edge and out-edge count of every block.
         let mut block_in_count = SecondaryMap::with_default(0);
@@ -383,12 +391,22 @@ impl BlockLoweringOrder {
 
         // Step 3: now that we have RPO, build the BlockIndex/BB fwd/rev maps.
         let mut lowered_order = vec![];
+        let mut cold_blocks = FxHashSet::default();
         let mut lowered_succ_ranges = vec![];
         let mut lb_to_bindex = FxHashMap::default();
         for (block, succ_range) in rpo.into_iter() {
-            lb_to_bindex.insert(block, lowered_order.len() as BlockIndex);
+            let index = lowered_order.len() as BlockIndex;
+            lb_to_bindex.insert(block, index);
             lowered_order.push(block);
             lowered_succ_ranges.push(succ_range);
+
+            if block
+                .orig_block()
+                .map(|b| f.layout.is_cold(b))
+                .unwrap_or(false)
+            {
+                cold_blocks.insert(index);
+            }
         }
 
         let lowered_succ_indices = lowered_succs
@@ -410,8 +428,9 @@ impl BlockLoweringOrder {
             lowered_succ_indices,
             lowered_succ_ranges,
             orig_map,
+            cold_blocks,
         };
-        debug!("BlockLoweringOrder: {:?}", result);
+        log::trace!("BlockLoweringOrder: {:?}", result);
         result
     }
 
@@ -420,24 +439,15 @@ impl BlockLoweringOrder {
         &self.lowered_order[..]
     }
 
-    /// Get the successors for a lowered block, by index in `lowered_order()`'s
-    /// returned slice. Each successsor is paired with the edge-instruction
-    /// (branch) corresponding to this edge.
-    pub fn succs(&self, block: BlockIndex) -> &[(Inst, LoweredBlock)] {
-        let range = self.lowered_succ_ranges[block as usize];
-        &self.lowered_succs[range.0..range.1]
-    }
-
     /// Get the successor indices for a lowered block.
     pub fn succ_indices(&self, block: BlockIndex) -> &[(Inst, BlockIndex)] {
         let range = self.lowered_succ_ranges[block as usize];
         &self.lowered_succ_indices[range.0..range.1]
     }
 
-    /// Get the lowered block index containing a CLIF block, if any. (May not be
-    /// present if the original CLIF block was unreachable.)
-    pub fn lowered_block_for_bb(&self, bb: Block) -> Option<BlockIndex> {
-        self.orig_map[bb]
+    /// Determine whether the given lowered-block index is cold.
+    pub fn is_cold(&self, block: BlockIndex) -> bool {
+        self.cold_blocks.contains(&block)
     }
 }
 

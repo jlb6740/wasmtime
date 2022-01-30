@@ -1,10 +1,6 @@
 use {
     proc_macro2::Span,
-    std::{
-        collections::HashMap,
-        iter::FromIterator,
-        path::{Path, PathBuf},
-    },
+    std::{collections::HashMap, iter::FromIterator, path::PathBuf},
     syn::{
         braced, bracketed,
         parse::{Parse, ParseStream},
@@ -16,22 +12,26 @@ use {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub witx: WitxConf,
-    pub ctx: CtxConf,
     pub errors: ErrorConf,
-}
-
-#[derive(Debug, Clone)]
-pub enum ConfigField {
-    Witx(WitxConf),
-    Ctx(CtxConf),
-    Error(ErrorConf),
+    pub async_: AsyncConf,
+    pub wasmtime: bool,
 }
 
 mod kw {
     syn::custom_keyword!(witx);
     syn::custom_keyword!(witx_literal);
-    syn::custom_keyword!(ctx);
+    syn::custom_keyword!(block_on);
     syn::custom_keyword!(errors);
+    syn::custom_keyword!(target);
+    syn::custom_keyword!(wasmtime);
+}
+
+#[derive(Debug, Clone)]
+pub enum ConfigField {
+    Witx(WitxConf),
+    Error(ErrorConf),
+    Async(AsyncConf),
+    Wasmtime(bool),
 }
 
 impl Parse for ConfigField {
@@ -45,14 +45,28 @@ impl Parse for ConfigField {
             input.parse::<kw::witx_literal>()?;
             input.parse::<Token![:]>()?;
             Ok(ConfigField::Witx(WitxConf::Literal(input.parse()?)))
-        } else if lookahead.peek(kw::ctx) {
-            input.parse::<kw::ctx>()?;
-            input.parse::<Token![:]>()?;
-            Ok(ConfigField::Ctx(input.parse()?))
         } else if lookahead.peek(kw::errors) {
             input.parse::<kw::errors>()?;
             input.parse::<Token![:]>()?;
             Ok(ConfigField::Error(input.parse()?))
+        } else if lookahead.peek(Token![async]) {
+            input.parse::<Token![async]>()?;
+            input.parse::<Token![:]>()?;
+            Ok(ConfigField::Async(AsyncConf {
+                blocking: false,
+                functions: input.parse()?,
+            }))
+        } else if lookahead.peek(kw::block_on) {
+            input.parse::<kw::block_on>()?;
+            input.parse::<Token![:]>()?;
+            Ok(ConfigField::Async(AsyncConf {
+                blocking: true,
+                functions: input.parse()?,
+            }))
+        } else if lookahead.peek(kw::wasmtime) {
+            input.parse::<kw::wasmtime>()?;
+            input.parse::<Token![:]>()?;
+            Ok(ConfigField::Wasmtime(input.parse::<syn::LitBool>()?.value))
         } else {
             Err(lookahead.error())
         }
@@ -62,8 +76,9 @@ impl Parse for ConfigField {
 impl Config {
     pub fn build(fields: impl Iterator<Item = ConfigField>, err_loc: Span) -> Result<Self> {
         let mut witx = None;
-        let mut ctx = None;
         let mut errors = None;
+        let mut async_ = None;
+        let mut wasmtime = None;
         for f in fields {
             match f {
                 ConfigField::Witx(c) => {
@@ -72,17 +87,23 @@ impl Config {
                     }
                     witx = Some(c);
                 }
-                ConfigField::Ctx(c) => {
-                    if ctx.is_some() {
-                        return Err(Error::new(err_loc, "duplicate `ctx` field"));
-                    }
-                    ctx = Some(c);
-                }
                 ConfigField::Error(c) => {
                     if errors.is_some() {
                         return Err(Error::new(err_loc, "duplicate `errors` field"));
                     }
                     errors = Some(c);
+                }
+                ConfigField::Async(c) => {
+                    if async_.is_some() {
+                        return Err(Error::new(err_loc, "duplicate `async` field"));
+                    }
+                    async_ = Some(c);
+                }
+                ConfigField::Wasmtime(c) => {
+                    if wasmtime.is_some() {
+                        return Err(Error::new(err_loc, "duplicate `wasmtime` field"));
+                    }
+                    wasmtime = Some(c);
                 }
             }
         }
@@ -90,10 +111,9 @@ impl Config {
             witx: witx
                 .take()
                 .ok_or_else(|| Error::new(err_loc, "`witx` field required"))?,
-            ctx: ctx
-                .take()
-                .ok_or_else(|| Error::new(err_loc, "`ctx` field required"))?,
             errors: errors.take().unwrap_or_default(),
+            async_: async_.take().unwrap_or_default(),
+            wasmtime: wasmtime.unwrap_or(true),
         })
     }
 
@@ -143,19 +163,6 @@ impl WitxConf {
             Self::Literal(doc) => witx::parse(doc.as_ref()).expect("parsing witx"),
         }
     }
-
-    /// If using the [`Paths`][paths] syntax, make all paths relative to a root directory.
-    ///
-    /// [paths]: enum.WitxConf.html#variant.Paths
-    pub fn make_paths_relative_to<P: AsRef<Path>>(&mut self, root: P) {
-        if let Self::Paths(paths) = self {
-            paths.as_mut().iter_mut().for_each(|p| {
-                if !p.is_absolute() {
-                    *p = PathBuf::from(root.as_ref()).join(p.clone());
-                }
-            });
-        }
-    }
 }
 
 /// A collection of paths, pointing to witx documents.
@@ -201,10 +208,19 @@ impl Parse for Paths {
         let content;
         let _ = bracketed!(content in input);
         let path_lits: Punctuated<LitStr, Token![,]> = content.parse_terminated(Parse::parse)?;
-        Ok(path_lits
+
+        let expanded_paths = path_lits
             .iter()
-            .map(|lit| PathBuf::from(lit.value()))
-            .collect())
+            .map(|lit| {
+                PathBuf::from(
+                    shellexpand::env(&lit.value())
+                        .expect("shell expansion")
+                        .as_ref(),
+                )
+            })
+            .collect::<Vec<PathBuf>>();
+
+        Ok(Paths(expanded_paths))
     }
 }
 
@@ -221,19 +237,6 @@ impl AsRef<str> for Literal {
 impl Parse for Literal {
     fn parse(input: ParseStream) -> Result<Self> {
         Ok(Self(input.parse::<syn::LitStr>()?.value()))
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct CtxConf {
-    pub name: Ident,
-}
-
-impl Parse for CtxConf {
-    fn parse(input: ParseStream) -> Result<Self> {
-        Ok(CtxConf {
-            name: input.parse()?,
-        })
     }
 }
 
@@ -300,5 +303,250 @@ impl Parse for ErrorConfField {
             rich_error,
             err_loc,
         })
+    }
+}
+
+#[derive(Clone, Default, Debug)]
+/// Modules and funcs that have async signatures
+pub struct AsyncConf {
+    blocking: bool,
+    functions: AsyncFunctions,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Asyncness {
+    /// Wiggle function is synchronous, wasmtime Func is synchronous
+    Sync,
+    /// Wiggle function is asynchronous, but wasmtime Func is synchronous
+    Blocking,
+    /// Wiggle function and wasmtime Func are asynchronous.
+    Async,
+}
+
+impl Asyncness {
+    pub fn is_async(&self) -> bool {
+        match self {
+            Self::Async => true,
+            _ => false,
+        }
+    }
+    pub fn is_blocking(&self) -> bool {
+        match self {
+            Self::Blocking => true,
+            _ => false,
+        }
+    }
+    pub fn is_sync(&self) -> bool {
+        match self {
+            Self::Sync => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum AsyncFunctions {
+    Some(HashMap<String, Vec<String>>),
+    All,
+}
+impl Default for AsyncFunctions {
+    fn default() -> Self {
+        AsyncFunctions::Some(HashMap::default())
+    }
+}
+
+impl AsyncConf {
+    pub fn get(&self, module: &str, function: &str) -> Asyncness {
+        let a = if self.blocking {
+            Asyncness::Blocking
+        } else {
+            Asyncness::Async
+        };
+        match &self.functions {
+            AsyncFunctions::Some(fs) => {
+                if fs
+                    .get(module)
+                    .and_then(|fs| fs.iter().find(|f| *f == function))
+                    .is_some()
+                {
+                    a
+                } else {
+                    Asyncness::Sync
+                }
+            }
+            AsyncFunctions::All => a,
+        }
+    }
+
+    pub fn contains_async(&self, module: &witx::Module) -> bool {
+        for f in module.funcs() {
+            if self.get(module.name.as_str(), f.name.as_str()).is_async() {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl Parse for AsyncFunctions {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let content;
+        let lookahead = input.lookahead1();
+        if lookahead.peek(syn::token::Brace) {
+            let _ = braced!(content in input);
+            let items: Punctuated<AsyncConfField, Token![,]> =
+                content.parse_terminated(Parse::parse)?;
+            let mut functions: HashMap<String, Vec<String>> = HashMap::new();
+            use std::collections::hash_map::Entry;
+            for i in items {
+                let function_names = i
+                    .function_names
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<String>>();
+                match functions.entry(i.module_name.to_string()) {
+                    Entry::Occupied(o) => o.into_mut().extend(function_names),
+                    Entry::Vacant(v) => {
+                        v.insert(function_names);
+                    }
+                }
+            }
+            Ok(AsyncFunctions::Some(functions))
+        } else if lookahead.peek(Token![*]) {
+            let _: Token![*] = input.parse().unwrap();
+            Ok(AsyncFunctions::All)
+        } else {
+            Err(lookahead.error())
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AsyncConfField {
+    pub module_name: Ident,
+    pub function_names: Vec<Ident>,
+    pub err_loc: Span,
+}
+
+impl Parse for AsyncConfField {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let err_loc = input.span();
+        let module_name = input.parse::<Ident>()?;
+        let _doublecolon: Token![::] = input.parse()?;
+        let lookahead = input.lookahead1();
+        if lookahead.peek(syn::token::Brace) {
+            let content;
+            let _ = braced!(content in input);
+            let function_names: Punctuated<Ident, Token![,]> =
+                content.parse_terminated(Parse::parse)?;
+            Ok(AsyncConfField {
+                module_name,
+                function_names: function_names.iter().cloned().collect(),
+                err_loc,
+            })
+        } else if lookahead.peek(Ident) {
+            let name = input.parse()?;
+            Ok(AsyncConfField {
+                module_name,
+                function_names: vec![name],
+                err_loc,
+            })
+        } else {
+            Err(lookahead.error())
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct WasmtimeConfig {
+    pub c: Config,
+    pub target: syn::Path,
+}
+
+#[derive(Clone)]
+pub enum WasmtimeConfigField {
+    Core(ConfigField),
+    Target(syn::Path),
+}
+impl WasmtimeConfig {
+    pub fn build(fields: impl Iterator<Item = WasmtimeConfigField>, err_loc: Span) -> Result<Self> {
+        let mut target = None;
+        let mut cs = Vec::new();
+        for f in fields {
+            match f {
+                WasmtimeConfigField::Target(c) => {
+                    if target.is_some() {
+                        return Err(Error::new(err_loc, "duplicate `target` field"));
+                    }
+                    target = Some(c);
+                }
+                WasmtimeConfigField::Core(c) => cs.push(c),
+            }
+        }
+        let c = Config::build(cs.into_iter(), err_loc)?;
+        Ok(WasmtimeConfig {
+            c,
+            target: target
+                .take()
+                .ok_or_else(|| Error::new(err_loc, "`target` field required"))?,
+        })
+    }
+}
+
+impl Parse for WasmtimeConfig {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let contents;
+        let _lbrace = braced!(contents in input);
+        let fields: Punctuated<WasmtimeConfigField, Token![,]> =
+            contents.parse_terminated(WasmtimeConfigField::parse)?;
+        Ok(WasmtimeConfig::build(fields.into_iter(), input.span())?)
+    }
+}
+
+impl Parse for WasmtimeConfigField {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let lookahead = input.lookahead1();
+        if lookahead.peek(kw::target) {
+            input.parse::<kw::target>()?;
+            input.parse::<Token![:]>()?;
+            Ok(WasmtimeConfigField::Target(input.parse()?))
+
+            // The remainder of this function is the ConfigField impl, wrapped in
+            // WasmtimeConfigField::Core. This is required to get the correct lookahead error.
+        } else if lookahead.peek(kw::witx) {
+            input.parse::<kw::witx>()?;
+            input.parse::<Token![:]>()?;
+            Ok(WasmtimeConfigField::Core(ConfigField::Witx(
+                WitxConf::Paths(input.parse()?),
+            )))
+        } else if lookahead.peek(kw::witx_literal) {
+            input.parse::<kw::witx_literal>()?;
+            input.parse::<Token![:]>()?;
+            Ok(WasmtimeConfigField::Core(ConfigField::Witx(
+                WitxConf::Literal(input.parse()?),
+            )))
+        } else if lookahead.peek(kw::errors) {
+            input.parse::<kw::errors>()?;
+            input.parse::<Token![:]>()?;
+            Ok(WasmtimeConfigField::Core(ConfigField::Error(
+                input.parse()?,
+            )))
+        } else if lookahead.peek(Token![async]) {
+            input.parse::<Token![async]>()?;
+            input.parse::<Token![:]>()?;
+            Ok(WasmtimeConfigField::Core(ConfigField::Async(AsyncConf {
+                blocking: false,
+                functions: input.parse()?,
+            })))
+        } else if lookahead.peek(kw::block_on) {
+            input.parse::<kw::block_on>()?;
+            input.parse::<Token![:]>()?;
+            Ok(WasmtimeConfigField::Core(ConfigField::Async(AsyncConf {
+                blocking: true,
+                functions: input.parse()?,
+            })))
+        } else {
+            Err(lookahead.error())
+        }
     }
 }

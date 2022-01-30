@@ -9,7 +9,7 @@ what's expected of contributors.
 All CI currently happens on GitHub Actions and is configured in the [`.github`
 directory][dir] of the repository.
 
-[dir]: https://github.com/bytecodealliance/wasmtime/tree/master/.github
+[dir]: https://github.com/bytecodealliance/wasmtime/tree/main/.github
 
 ## PRs and CI
 
@@ -33,7 +33,7 @@ run on CI looks like this:
 
 * Book documentation tests - code snippets (Rust ones at least) in the book
   documentation ([the `docs`
-  folder](https://github.com/bytecodealliance/wasmtime/tree/master/docs)) are
+  folder](https://github.com/bytecodealliance/wasmtime/tree/main/docs)) are
   tested on CI to ensure they are working.
 
 * Crate tests - the moral equivalent of `cargo test --all` and `cargo test --all
@@ -46,7 +46,8 @@ run on CI looks like this:
   corpus](https://github.com/bytecodealliance/wasmtime-libfuzzer-corpus) and run
   it through the fuzzers. This is mostly intended to be a pretty quick
   regression test and testing the fuzzers still build, most of our fuzzing
-  happens on [oss-fuzz](https://oss-fuzz.com).
+  happens on [oss-fuzz](https://oss-fuzz.com). Found issues are recorded in
+  the [oss-fuzz bug tracker](https://bugs.chromium.org/p/oss-fuzz/issues/list?q=-status%3AWontFix%2CDuplicate%20-component%3AInfra%20proj%3Awasmtime&can=1)
 
 While we do run more tests here and there, this is the general shape of what you
 can be expected to get tested on CI for all commits and all PRs. You can of
@@ -78,7 +79,7 @@ builder](https://github.com/bytecodealliance/wasmtime/runs/488719677?check_suite
 you can see the artifacts link in the top right. Note that artifacts don't
 become available until the whole run finishes.
 
-Commits merged into the master branch will rerun CI and will also produce
-artifacts as usual. On the master branch, however, documentation is pushed to
+Commits merged into the `main` branch will rerun CI and will also produce
+artifacts as usual. On the `main` branch, however, documentation is pushed to
 the `gh-pages` branch as well, and binaries are pushed to the `dev` release on
 GitHub. Finally, tagged commits get a whole dedicated release to them too.

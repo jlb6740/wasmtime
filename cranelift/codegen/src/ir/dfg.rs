@@ -7,10 +7,9 @@ use crate::ir::extfunc::ExtFuncData;
 use crate::ir::instructions::{BranchInfo, CallInfo, InstructionData};
 use crate::ir::{types, ConstantData, ConstantPool, Immediate};
 use crate::ir::{
-    Block, FuncRef, Inst, SigRef, Signature, Type, Value, ValueLabelAssignments, ValueList,
-    ValueListPool,
+    Block, FuncRef, Inst, SigRef, Signature, SourceLoc, Type, Value, ValueLabelAssignments,
+    ValueList, ValueListPool,
 };
-use crate::isa::TargetIsa;
 use crate::packed_option::ReservedValue;
 use crate::write::write_operands;
 use crate::HashMap;
@@ -21,6 +20,9 @@ use core::mem;
 use core::ops::{Index, IndexMut};
 use core::u16;
 
+#[cfg(feature = "enable-serde")]
+use serde::{Deserialize, Serialize};
+
 /// A data flow graph defines all instructions and basic blocks in a function as well as
 /// the data flow dependencies between them. The DFG also tracks values which can be either
 /// instruction results or block parameters.
@@ -29,6 +31,7 @@ use core::u16;
 /// `Layout` data structure which forms the other half of the function representation.
 ///
 #[derive(Clone)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct DataFlowGraph {
     /// Data about all of the instructions in the function, including opcodes and operands.
     /// The instructions in this map are not in program order. That is tracked by `Layout`, along
@@ -147,6 +150,14 @@ impl DataFlowGraph {
     pub fn collect_debug_info(&mut self) {
         if self.values_labels.is_none() {
             self.values_labels = Some(HashMap::new());
+        }
+    }
+
+    /// Inserts a `ValueLabelAssignments::Alias` for `to_alias` if debug info
+    /// collection is enabled.
+    pub fn add_value_label_alias(&mut self, to_alias: Value, from: SourceLoc, value: Value) {
+        if let Some(values_labels) = self.values_labels.as_mut() {
+            values_labels.insert(to_alias, ir::ValueLabelAssignments::Alias { from, value });
         }
     }
 }
@@ -416,6 +427,7 @@ impl ValueDef {
 
 /// Internal table storage for extended values.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 enum ValueData {
     /// Value is defined by an instruction.
     Inst { ty: Type, num: u16, inst: Inst },
@@ -453,12 +465,8 @@ impl DataFlowGraph {
     }
 
     /// Returns an object that displays `inst`.
-    pub fn display_inst<'a, I: Into<Option<&'a dyn TargetIsa>>>(
-        &'a self,
-        inst: Inst,
-        isa: I,
-    ) -> DisplayInst<'a> {
-        DisplayInst(self, isa.into(), inst)
+    pub fn display_inst<'a>(&'a self, inst: Inst) -> DisplayInst<'a> {
+        DisplayInst(self, inst)
     }
 
     /// Get all value arguments on `inst` as a slice.
@@ -644,7 +652,7 @@ impl DataFlowGraph {
             old_value,
             "{} wasn't detached from {}",
             old_value,
-            self.display_inst(inst, None)
+            self.display_inst(inst)
         );
         new_value
     }
@@ -935,6 +943,7 @@ impl DataFlowGraph {
 /// branches to this block must provide matching arguments, and the arguments to the entry block must
 /// match the function arguments.
 #[derive(Clone)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 struct BlockData {
     /// List of parameters to this block.
     params: ValueList,
@@ -949,13 +958,12 @@ impl BlockData {
 }
 
 /// Object that can display an instruction.
-pub struct DisplayInst<'a>(&'a DataFlowGraph, Option<&'a dyn TargetIsa>, Inst);
+pub struct DisplayInst<'a>(&'a DataFlowGraph, Inst);
 
 impl<'a> fmt::Display for DisplayInst<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let dfg = self.0;
-        let isa = self.1;
-        let inst = self.2;
+        let inst = self.1;
 
         if let Some((first, rest)) = dfg.inst_results(inst).split_first() {
             write!(f, "{}", first)?;
@@ -971,7 +979,7 @@ impl<'a> fmt::Display for DisplayInst<'a> {
         } else {
             write!(f, "{}.{}", dfg[inst].opcode(), typevar)?;
         }
-        write_operands(f, dfg, isa, inst)
+        write_operands(f, dfg, inst)
     }
 }
 
@@ -1136,10 +1144,7 @@ mod tests {
 
         dfg.make_inst_results(inst, types::I32);
         assert_eq!(inst.to_string(), "inst0");
-        assert_eq!(
-            dfg.display_inst(inst, None).to_string(),
-            "v0 = iconst.i32 0"
-        );
+        assert_eq!(dfg.display_inst(inst).to_string(), "v0 = iconst.i32 0");
 
         // Immutable reference resolution.
         {
@@ -1174,7 +1179,7 @@ mod tests {
             code: TrapCode::User(0),
         };
         let inst = dfg.make_inst(idata);
-        assert_eq!(dfg.display_inst(inst, None).to_string(), "trap user0");
+        assert_eq!(dfg.display_inst(inst).to_string(), "trap user0");
 
         // Result slice should be empty.
         assert_eq!(dfg.inst_results(inst), &[]);

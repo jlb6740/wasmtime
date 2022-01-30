@@ -1,14 +1,13 @@
 //! Provides functionality for compiling and running CLIF IR for `run` tests.
-use core::{mem, ptr};
-use cranelift_codegen::binemit::{NullRelocSink, NullStackmapSink, NullTrapSink};
-use cranelift_codegen::ir::{condcodes::IntCC, Function, InstBuilder, Signature, Type};
+use core::mem;
+use cranelift_codegen::data_value::DataValue;
+use cranelift_codegen::ir::{condcodes::IntCC, Function, InstBuilder, Signature};
 use cranelift_codegen::isa::TargetIsa;
 use cranelift_codegen::{ir, settings, CodegenError, Context};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift_native::builder as host_isa_builder;
-use cranelift_reader::DataValue;
+use cranelift_native::builder_with_options;
 use log::trace;
-use memmap::{Mmap, MmapMut};
+use memmap2::{Mmap, MmapMut};
 use std::cmp::max;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -17,10 +16,10 @@ use thiserror::Error;
 ///
 /// Several Cranelift functions need the ability to run Cranelift IR (e.g. `test_run`); this
 /// [SingleFunctionCompiler] provides a way for compiling Cranelift [Function]s to
-/// [CompiledFunction]s and subsequently calling them through the use of a [Trampoline]. As its
+/// `CompiledFunction`s and subsequently calling them through the use of a `Trampoline`. As its
 /// name indicates, this compiler is limited: any functionality that requires knowledge of things
 /// outside the [Function] will likely not work (e.g. global values, calls). For an example of this
-/// "outside-of-function" functionality, see `cranelift_simplejit::backend::SimpleJITBackend`.
+/// "outside-of-function" functionality, see `cranelift_jit::backend::JITBackend`.
 ///
 /// ```
 /// use cranelift_filetests::SingleFunctionCompiler;
@@ -39,7 +38,8 @@ pub struct SingleFunctionCompiler {
 
 impl SingleFunctionCompiler {
     /// Build a [SingleFunctionCompiler] from a [TargetIsa]. For functions to be runnable on the
-    /// host machine, this [TargetISA] must match the host machine's ISA (see [with_host_isa]).
+    /// host machine, this [TargetIsa] must match the host machine's ISA (see
+    /// [SingleFunctionCompiler::with_host_isa]).
     pub fn new(isa: Box<dyn TargetIsa>) -> Self {
         let trampolines = HashMap::new();
         Self { isa, trampolines }
@@ -47,7 +47,8 @@ impl SingleFunctionCompiler {
 
     /// Build a [SingleFunctionCompiler] using the host machine's ISA and the passed flags.
     pub fn with_host_isa(flags: settings::Flags) -> Self {
-        let builder = host_isa_builder().expect("Unable to build a TargetIsa for the current host");
+        let builder =
+            builder_with_options(true).expect("Unable to build a TargetIsa for the current host");
         let isa = builder.finish(flags);
         Self::new(isa)
     }
@@ -59,10 +60,10 @@ impl SingleFunctionCompiler {
         Self::with_host_isa(flags)
     }
 
-    /// Compile the passed [Function] to a [CompiledFunction]. This function will:
+    /// Compile the passed [Function] to a `CompiledFunction`. This function will:
     ///  - check that the default ISA calling convention is used (to ensure it can be called)
     ///  - compile the [Function]
-    ///  - compile a [Trampoline] for the [Function]'s signature (or used a cached [Trampoline];
+    ///  - compile a `Trampoline` for the [Function]'s signature (or used a cached `Trampoline`;
     ///    this makes it possible to call functions when the signature is not known until runtime.
     pub fn compile(&mut self, function: Function) -> Result<CompiledFunction, CompilationError> {
         let signature = function.signature.clone();
@@ -88,13 +89,17 @@ impl SingleFunctionCompiler {
     }
 }
 
+/// Compilation Error when compiling a function.
 #[derive(Error, Debug)]
 pub enum CompilationError {
+    /// This Target ISA is invalid for the current host.
     #[error("Cross-compilation not currently supported; use the host's default calling convention \
     or remove the specified calling convention in the function signature to use the host's default.")]
     InvalidTargetIsa,
+    /// Cranelift codegen error.
     #[error("Cranelift codegen error")]
     CodegenError(#[from] CodegenError),
+    /// Memory mapping error.
     #[error("Memory mapping error")]
     IoError(#[from] std::io::Error),
 }
@@ -125,7 +130,8 @@ impl Trampoline {
 ///
 /// ```
 /// use cranelift_filetests::SingleFunctionCompiler;
-/// use cranelift_reader::{parse_functions, DataValue};
+/// use cranelift_reader::parse_functions;
+/// use cranelift_codegen::data_value::DataValue;
 ///
 /// let code = "test run \n function %add(i32, i32) -> i32 {  block0(v0:i32, v1:i32):  v2 = iadd v0, v1  return v2 }".into();
 /// let func = parse_functions(code).unwrap().into_iter().nth(0).unwrap();
@@ -190,13 +196,13 @@ impl UnboxedValues {
         // Store the argument values into `values_vec`.
         for ((arg, slot), param) in arguments.iter().zip(&mut values_vec).zip(&signature.params) {
             assert!(
-                arg.ty() == param.value_type || arg.is_vector(),
+                arg.ty() == param.value_type || arg.is_vector() || arg.is_bool(),
                 "argument type mismatch: {} != {}",
                 arg.ty(),
                 param.value_type
             );
             unsafe {
-                Self::write_value_to(arg, slot);
+                arg.write_value_to(slot);
             }
         }
 
@@ -216,42 +222,11 @@ impl UnboxedValues {
 
         // Extract the returned values from this vector.
         for (slot, param) in self.0.iter().zip(&signature.returns) {
-            let value = unsafe { Self::read_value_from(slot, param.value_type) };
+            let value = unsafe { DataValue::read_value_from(slot, param.value_type) };
             returns.push(value);
         }
 
         returns
-    }
-
-    /// Write a [DataValue] to a memory location.
-    unsafe fn write_value_to(v: &DataValue, p: *mut u128) {
-        match v {
-            DataValue::B(b) => ptr::write(p as *mut bool, *b),
-            DataValue::I8(i) => ptr::write(p as *mut i8, *i),
-            DataValue::I16(i) => ptr::write(p as *mut i16, *i),
-            DataValue::I32(i) => ptr::write(p as *mut i32, *i),
-            DataValue::I64(i) => ptr::write(p as *mut i64, *i),
-            DataValue::F32(f) => ptr::write(p as *mut f32, *f),
-            DataValue::F64(f) => ptr::write(p as *mut f64, *f),
-            DataValue::V128(b) => ptr::write(p as *mut [u8; 16], *b),
-        }
-    }
-
-    /// Read a [DataValue] from a memory location using a given [Type].
-    unsafe fn read_value_from(p: *const u128, ty: Type) -> DataValue {
-        match ty {
-            ir::types::I8 => DataValue::I8(ptr::read(p as *const i8)),
-            ir::types::I16 => DataValue::I16(ptr::read(p as *const i16)),
-            ir::types::I32 => DataValue::I32(ptr::read(p as *const i32)),
-            ir::types::I64 => DataValue::I64(ptr::read(p as *const i64)),
-            ir::types::F32 => DataValue::F32(ptr::read(p as *const f32)),
-            ir::types::F64 => DataValue::F64(ptr::read(p as *const f64)),
-            _ if ty.is_bool() => DataValue::B(ptr::read(p as *const bool)),
-            _ if ty.is_vector() && ty.bytes() == 16 => {
-                DataValue::V128(ptr::read(p as *const [u8; 16]))
-            }
-            _ => unimplemented!(),
-        }
     }
 }
 
@@ -265,14 +240,11 @@ fn compile(function: Function, isa: &dyn TargetIsa) -> Result<Mmap, CompilationE
     context.func = function;
 
     // Compile and encode the result to machine code.
-    let relocs = &mut NullRelocSink {};
-    let traps = &mut NullTrapSink {};
-    let stackmaps = &mut NullStackmapSink {};
     let code_info = context.compile(isa)?;
     let mut code_page = MmapMut::map_anon(code_info.total_size as usize)?;
 
     unsafe {
-        context.emit_to_memory(isa, code_page.as_mut_ptr(), relocs, traps, stackmaps);
+        context.emit_to_memory(code_page.as_mut_ptr());
     };
 
     let code_page = code_page.make_exec()?;
@@ -321,13 +293,8 @@ fn make_trampoline(signature: &ir::Signature, isa: &dyn TargetIsa) -> Function {
         .enumerate()
         .map(|(i, param)| {
             // Calculate the type to load from memory, using integers for booleans (no encodings).
-            let ty = if param.value_type.is_bool() {
-                Type::int(max(param.value_type.bits(), 8)).expect(
-                    "to be able to convert any boolean type to its equal-width integer type",
-                )
-            } else {
-                param.value_type
-            };
+            let ty = param.value_type.coerce_bools_to_ints();
+
             // Load the value.
             let loaded = builder.ins().load(
                 ty,
@@ -335,11 +302,16 @@ fn make_trampoline(signature: &ir::Signature, isa: &dyn TargetIsa) -> Function {
                 values_vec_ptr_val,
                 (i * UnboxedValues::SLOT_SIZE) as i32,
             );
+
             // For booleans, we want to type-convert the loaded integer into a boolean and ensure
             // that we are using the architecture's canonical boolean representation (presumably
             // comparison will emit this).
             if param.value_type.is_bool() {
                 builder.ins().icmp_imm(IntCC::NotEqual, loaded, 0)
+            } else if param.value_type.is_bool_vector() {
+                let zero_constant = builder.func.dfg.constants.insert(vec![0; 16].into());
+                let zero_vec = builder.ins().vconst(ty, zero_constant);
+                builder.ins().icmp(IntCC::NotEqual, loaded, zero_vec)
             } else {
                 loaded
             }
@@ -356,9 +328,8 @@ fn make_trampoline(signature: &ir::Signature, isa: &dyn TargetIsa) -> Function {
     let results = builder.func.dfg.inst_results(call).to_vec();
     for ((i, value), param) in results.iter().enumerate().zip(&signature.returns) {
         // Before storing return values, we convert booleans to their integer representation.
-        let value = if param.value_type.is_bool() {
-            let ty = Type::int(max(param.value_type.bits(), 8))
-                .expect("to be able to convert any boolean type to its equal-width integer type");
+        let value = if param.value_type.lane_type().is_bool() {
+            let ty = param.value_type.lane_type().as_int();
             builder.ins().bint(ty, *value)
         } else {
             *value

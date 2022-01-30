@@ -1,10 +1,9 @@
 #![allow(non_snake_case)]
 
 use crate::cdsl::instructions::{
-    AllInstructions, InstructionBuilder as Inst, InstructionGroup, InstructionGroupBuilder,
+    AllInstructions, InstructionBuilder as Inst, InstructionGroupBuilder,
 };
 use crate::cdsl::operands::Operand;
-use crate::cdsl::type_inference::Constraint::WiderOrEq;
 use crate::cdsl::types::{LaneType, ValueType};
 use crate::cdsl::typevar::{Interval, TypeSetBuilder, TypeVar};
 use crate::shared::formats::Formats;
@@ -30,26 +29,6 @@ fn define_control_flow(
         Unconditionally jump to a basic block, passing the specified
         block arguments. The number and types of arguments must match the
         destination block.
-        "#,
-            &formats.jump,
-        )
-        .operands_in(vec![block, args])
-        .is_terminator(true)
-        .is_branch(true),
-    );
-
-    ig.push(
-        Inst::new(
-            "fallthrough",
-            r#"
-        Fall through to the next block.
-
-        This is the same as `jump`, except the destination block must be
-        the next one in the layout.
-
-        Jumps are turned into fall-through instructions by the branch
-        relaxation pass. There is no reason to use this instruction outside
-        that pass.
         "#,
             &formats.jump,
         )
@@ -211,70 +190,8 @@ fn define_control_flow(
     let iAddr = &TypeVar::new(
         "iAddr",
         "An integer address type",
-        TypeSetBuilder::new().ints(32..64).build(),
+        TypeSetBuilder::new().ints(32..64).refs(32..64).build(),
     );
-
-    {
-        let x = &Operand::new("x", iAddr).with_doc("index into jump table");
-        let addr = &Operand::new("addr", iAddr);
-        let Size = &Operand::new("Size", &imm.uimm8).with_doc("Size in bytes");
-        let JT = &Operand::new("JT", &entities.jump_table);
-        let entry = &Operand::new("entry", iAddr).with_doc("entry of jump table");
-
-        ig.push(
-            Inst::new(
-                "jump_table_entry",
-                r#"
-    Get an entry from a jump table.
-
-    Load a serialized ``entry`` from a jump table ``JT`` at a given index
-    ``addr`` with a specific ``Size``. The retrieved entry may need to be
-    decoded after loading, depending upon the jump table type used.
-
-    Currently, the only type supported is entries which are relative to the
-    base of the jump table.
-    "#,
-                &formats.branch_table_entry,
-            )
-            .operands_in(vec![x, addr, Size, JT])
-            .operands_out(vec![entry])
-            .can_load(true),
-        );
-
-        ig.push(
-            Inst::new(
-                "jump_table_base",
-                r#"
-    Get the absolute base address of a jump table.
-
-    This is used for jump tables wherein the entries are stored relative to
-    the base of jump table. In order to use these, generated code should first
-    load an entry using ``jump_table_entry``, then use this instruction to add
-    the relative base back to it.
-    "#,
-                &formats.branch_table_base,
-            )
-            .operands_in(vec![JT])
-            .operands_out(vec![addr]),
-        );
-
-        ig.push(
-            Inst::new(
-                "indirect_jump_table_br",
-                r#"
-    Branch indirectly via a jump table entry.
-
-    Unconditionally jump via a jump table entry that was previously loaded
-    with the ``jump_table_entry`` instruction.
-    "#,
-                &formats.indirect_jump,
-            )
-            .operands_in(vec![addr, JT])
-            .is_indirect_branch(true)
-            .is_terminator(true)
-            .is_branch(true),
-        );
-    }
 
     ig.push(
         Inst::new(
@@ -693,6 +610,72 @@ fn define_simd_arithmetic(
         .operands_in(vec![x, y])
         .operands_out(vec![a]),
     );
+
+    ig.push(
+        Inst::new(
+            "uadd_sat",
+            r#"
+        Add with unsigned saturation.
+
+        This is similar to `iadd` but the operands are interpreted as unsigned integers and their
+        summed result, instead of wrapping, will be saturated to the highest unsigned integer for
+        the controlling type (e.g. `0xFF` for i8).
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![x, y])
+        .operands_out(vec![a]),
+    );
+
+    ig.push(
+        Inst::new(
+            "sadd_sat",
+            r#"
+        Add with signed saturation.
+
+        This is similar to `iadd` but the operands are interpreted as signed integers and their
+        summed result, instead of wrapping, will be saturated to the lowest or highest
+        signed integer for the controlling type (e.g. `0x80` or `0x7F` for i8). For example,
+        since an `sadd_sat.i8` of `0x70` and `0x70` is greater than `0x7F`, the result will be
+        clamped to `0x7F`.
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![x, y])
+        .operands_out(vec![a]),
+    );
+
+    ig.push(
+        Inst::new(
+            "usub_sat",
+            r#"
+        Subtract with unsigned saturation.
+
+        This is similar to `isub` but the operands are interpreted as unsigned integers and their
+        difference, instead of wrapping, will be saturated to the lowest unsigned integer for
+        the controlling type (e.g. `0x00` for i8).
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![x, y])
+        .operands_out(vec![a]),
+    );
+
+    ig.push(
+        Inst::new(
+            "ssub_sat",
+            r#"
+        Subtract with signed saturation.
+
+        This is similar to `isub` but the operands are interpreted as signed integers and their
+        difference, instead of wrapping, will be saturated to the lowest or highest
+        signed integer for the controlling type (e.g. `0x80` or `0x7F` for i8).
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![x, y])
+        .operands_out(vec![a]),
+    );
 }
 
 #[allow(clippy::many_single_char_names)]
@@ -701,7 +684,7 @@ pub(crate) fn define(
     formats: &Formats,
     imm: &Immediates,
     entities: &EntityRefs,
-) -> InstructionGroup {
+) {
     let mut ig = InstructionGroupBuilder::new(all_instructions);
 
     define_control_flow(&mut ig, formats, imm, entities);
@@ -744,7 +727,7 @@ pub(crate) fn define(
     let iAddr = &TypeVar::new(
         "iAddr",
         "An integer address type",
-        TypeSetBuilder::new().ints(32..64).build(),
+        TypeSetBuilder::new().ints(32..64).refs(32..64).build(),
     );
 
     let Ref = &TypeVar::new(
@@ -1748,6 +1731,34 @@ pub(crate) fn define(
         .operands_out(vec![a]),
     );
 
+    ig.push(
+        Inst::new(
+            "selectif_spectre_guard",
+            r#"
+            Conditional select intended for Spectre guards.
+
+            This operation is semantically equivalent to a selectif instruction.
+            However, it is guaranteed to not be removed or otherwise altered by any
+            optimization pass, and is guaranteed to result in a conditional-move
+            instruction, not a branch-based lowering.  As such, it is suitable
+            for use when producing Spectre guards. For example, a bounds-check
+            may guard against unsafe speculation past a bounds-check conditional
+            branch by passing the address or index to be accessed through a
+            conditional move, also gated on the same condition. Because no
+            Spectre-vulnerable processors are known to perform speculation on
+            conditional move instructions, this is guaranteed to pick the
+            correct input. If the selected input in case of overflow is a "safe"
+            value, for example a null pointer that causes an exception in the
+            speculative path, this ensures that no Spectre vulnerability will
+            exist.
+            "#,
+            &formats.int_select,
+        )
+        .operands_in(vec![cc, flags, x, y])
+        .operands_out(vec![a])
+        .other_side_effects(true),
+    );
+
     let c = &Operand::new("c", Any).with_doc("Controlling value to test");
     ig.push(
         Inst::new(
@@ -1788,184 +1799,6 @@ pub(crate) fn define(
 
     ig.push(
         Inst::new(
-            "spill",
-            r#"
-        Spill a register value to a stack slot.
-
-        This instruction behaves exactly like `copy`, but the result
-        value is assigned to a spill slot.
-        "#,
-            &formats.unary,
-        )
-        .operands_in(vec![x])
-        .operands_out(vec![a])
-        .can_store(true),
-    );
-
-    ig.push(
-        Inst::new(
-            "fill",
-            r#"
-        Load a register value from a stack slot.
-
-        This instruction behaves exactly like `copy`, but creates a new
-        SSA value for the spilled input value.
-        "#,
-            &formats.unary,
-        )
-        .operands_in(vec![x])
-        .operands_out(vec![a])
-        .can_load(true),
-    );
-
-    ig.push(
-        Inst::new(
-            "fill_nop",
-            r#"
-        This is identical to `fill`, except it has no encoding, since it is a no-op.
-
-        This instruction is created only during late-stage redundant-reload removal, after all
-        registers and stack slots have been assigned.  It is used to replace `fill`s that have
-        been identified as redundant.
-        "#,
-            &formats.unary,
-        )
-        .operands_in(vec![x])
-        .operands_out(vec![a])
-        .can_load(true),
-    );
-
-    let src = &Operand::new("src", &imm.regunit);
-    let dst = &Operand::new("dst", &imm.regunit);
-
-    ig.push(
-        Inst::new(
-            "regmove",
-            r#"
-        Temporarily divert ``x`` from ``src`` to ``dst``.
-
-        This instruction moves the location of a value from one register to
-        another without creating a new SSA value. It is used by the register
-        allocator to temporarily rearrange register assignments in order to
-        satisfy instruction constraints.
-
-        The register diversions created by this instruction must be undone
-        before the value leaves the block. At the entry to a new block, all live
-        values must be in their originally assigned registers.
-        "#,
-            &formats.reg_move,
-        )
-        .operands_in(vec![x, src, dst])
-        .other_side_effects(true),
-    );
-
-    ig.push(
-        Inst::new(
-            "copy_special",
-            r#"
-        Copies the contents of ''src'' register to ''dst'' register.
-
-        This instructions copies the contents of one register to another
-        register without involving any SSA values. This is used for copying
-        special registers, e.g. copying the stack register to the frame
-        register in a function prologue.
-        "#,
-            &formats.copy_special,
-        )
-        .operands_in(vec![src, dst])
-        .other_side_effects(true),
-    );
-
-    ig.push(
-        Inst::new(
-            "copy_to_ssa",
-            r#"
-        Copies the contents of ''src'' register to ''a'' SSA name.
-
-        This instruction copies the contents of one register, regardless of its SSA name, to
-        another register, creating a new SSA name.  In that sense it is a one-sided version
-        of ''copy_special''.  This instruction is internal and should not be created by
-        Cranelift users.
-        "#,
-            &formats.copy_to_ssa,
-        )
-        .operands_in(vec![src])
-        .operands_out(vec![a])
-        .other_side_effects(true),
-    );
-
-    ig.push(
-        Inst::new(
-            "copy_nop",
-            r#"
-        Stack-slot-to-the-same-stack-slot copy, which is guaranteed to turn
-        into a no-op.  This instruction is for use only within Cranelift itself.
-
-        This instruction copies its input, preserving the value type.
-        "#,
-            &formats.unary,
-        )
-        .operands_in(vec![x])
-        .operands_out(vec![a]),
-    );
-
-    let delta = &Operand::new("delta", Int);
-
-    ig.push(
-        Inst::new(
-            "adjust_sp_down",
-            r#"
-    Subtracts ``delta`` offset value from the stack pointer register.
-
-    This instruction is used to adjust the stack pointer by a dynamic amount.
-    "#,
-            &formats.unary,
-        )
-        .operands_in(vec![delta])
-        .other_side_effects(true),
-    );
-
-    let Offset = &Operand::new("Offset", &imm.imm64).with_doc("Offset from current stack pointer");
-
-    ig.push(
-        Inst::new(
-            "adjust_sp_up_imm",
-            r#"
-    Adds ``Offset`` immediate offset value to the stack pointer register.
-
-    This instruction is used to adjust the stack pointer, primarily in function
-    prologues and epilogues. ``Offset`` is constrained to the size of a signed
-    32-bit integer.
-    "#,
-            &formats.unary_imm,
-        )
-        .operands_in(vec![Offset])
-        .other_side_effects(true),
-    );
-
-    let Offset = &Operand::new("Offset", &imm.imm64).with_doc("Offset from current stack pointer");
-
-    ig.push(
-        Inst::new(
-            "adjust_sp_down_imm",
-            r#"
-    Subtracts ``Offset`` immediate offset value from the stack pointer
-    register.
-
-    This instruction is used to adjust the stack pointer, primarily in function
-    prologues and epilogues. ``Offset`` is constrained to the size of a signed
-    32-bit integer.
-    "#,
-            &formats.unary_imm,
-        )
-        .operands_in(vec![Offset])
-        .other_side_effects(true),
-    );
-
-    let f = &Operand::new("f", iflags);
-
-    ig.push(
-        Inst::new(
             "ifcmp_sp",
             r#"
     Compare ``addr`` with the stack pointer and set the CPU flags.
@@ -1976,61 +1809,7 @@ pub(crate) fn define(
             &formats.unary,
         )
         .operands_in(vec![addr])
-        .operands_out(vec![f]),
-    );
-
-    ig.push(
-        Inst::new(
-            "regspill",
-            r#"
-        Temporarily divert ``x`` from ``src`` to ``SS``.
-
-        This instruction moves the location of a value from a register to a
-        stack slot without creating a new SSA value. It is used by the register
-        allocator to temporarily rearrange register assignments in order to
-        satisfy instruction constraints.
-
-        See also `regmove`.
-        "#,
-            &formats.reg_spill,
-        )
-        .operands_in(vec![x, src, SS])
-        .other_side_effects(true),
-    );
-
-    ig.push(
-        Inst::new(
-            "regfill",
-            r#"
-        Temporarily divert ``x`` from ``SS`` to ``dst``.
-
-        This instruction moves the location of a value from a stack slot to a
-        register without creating a new SSA value. It is used by the register
-        allocator to temporarily rearrange register assignments in order to
-        satisfy instruction constraints.
-
-        See also `regmove`.
-        "#,
-            &formats.reg_fill,
-        )
-        .operands_in(vec![x, SS, dst])
-        .other_side_effects(true),
-    );
-
-    let N =
-        &Operand::new("args", &entities.varargs).with_doc("Variable number of args for Stackmap");
-
-    ig.push(
-        Inst::new(
-            "safepoint",
-            r#"
-        This instruction will provide live reference values at a point in
-        the function. It can only be used by the compiler.
-        "#,
-            &formats.multiary,
-        )
-        .operands_in(vec![N])
-        .other_side_effects(true),
+        .operands_out(vec![flags]),
     );
 
     let x = &Operand::new("x", TxN).with_doc("Vector to split");
@@ -2050,8 +1829,7 @@ pub(crate) fn define(
             &formats.unary,
         )
         .operands_in(vec![x])
-        .operands_out(vec![lo, hi])
-        .is_ghost(true),
+        .operands_out(vec![lo, hi]),
     );
 
     let Any128 = &TypeVar::new(
@@ -2086,8 +1864,7 @@ pub(crate) fn define(
             &formats.binary,
         )
         .operands_in(vec![x, y])
-        .operands_out(vec![a])
-        .is_ghost(true),
+        .operands_out(vec![a]),
     );
 
     let c = &Operand::new("c", &TxN.as_bool()).with_doc("Controlling vector");
@@ -2140,6 +1917,24 @@ pub(crate) fn define(
         .operands_out(vec![s]),
     );
 
+    let a = &Operand::new("a", TxN);
+    let x = &Operand::new("x", Int);
+
+    ig.push(
+        Inst::new(
+            "vhigh_bits",
+            r#"
+        Reduce a vector to a scalar integer.
+
+        Return a scalar integer, consisting of the concatenation of the most significant bit
+        of each lane of ``a``.
+        "#,
+            &formats.unary,
+        )
+        .operands_in(vec![a])
+        .operands_out(vec![x]),
+    );
+
     let a = &Operand::new("a", &Int.as_bool());
     let Cond = &Operand::new("Cond", &imm.intcc);
     let x = &Operand::new("x", Int);
@@ -2165,10 +1960,9 @@ pub(crate) fn define(
         | of     | *        | Overflow              |
         | nof    | *        | No Overflow           |
 
-        \* The unsigned version of overflow conditions have ISA-specific
-        semantics and thus have been kept as methods on the TargetIsa trait as
-        [unsigned_add_overflow_condition][isa::TargetIsa::unsigned_add_overflow_condition] and
-        [unsigned_sub_overflow_condition][isa::TargetIsa::unsigned_sub_overflow_condition].
+        \* The unsigned version of overflow condition for add has ISA-specific semantics and thus
+        has been kept as a method on the TargetIsa trait as
+        [unsigned_add_overflow_condition][crate::isa::TargetIsa::unsigned_add_overflow_condition].
 
         When this instruction compares integer vectors, it returns a boolean
         vector of lane-wise comparisons.
@@ -2256,40 +2050,6 @@ pub(crate) fn define(
 
     ig.push(
         Inst::new(
-            "uadd_sat",
-            r#"
-        Add with unsigned saturation.
-
-        This is similar to `iadd` but the operands are interpreted as unsigned integers and their
-        summed result, instead of wrapping, will be saturated to the highest unsigned integer for
-        the controlling type (e.g. `0xFF` for i8).
-        "#,
-            &formats.binary,
-        )
-        .operands_in(vec![x, y])
-        .operands_out(vec![a]),
-    );
-
-    ig.push(
-        Inst::new(
-            "sadd_sat",
-            r#"
-        Add with signed saturation.
-
-        This is similar to `iadd` but the operands are interpreted as signed integers and their
-        summed result, instead of wrapping, will be saturated to the lowest or highest
-        signed integer for the controlling type (e.g. `0x80` or `0x7F` for i8). For example,
-        since an `sadd_sat.i8` of `0x70` and `0x70` is greater than `0x7F`, the result will be
-        clamped to `0x7F`.
-        "#,
-            &formats.binary,
-        )
-        .operands_in(vec![x, y])
-        .operands_out(vec![a]),
-    );
-
-    ig.push(
-        Inst::new(
             "isub",
             r#"
         Wrapping integer subtraction: `a := x - y \pmod{2^B}`.
@@ -2305,41 +2065,21 @@ pub(crate) fn define(
 
     ig.push(
         Inst::new(
-            "usub_sat",
-            r#"
-        Subtract with unsigned saturation.
-
-        This is similar to `isub` but the operands are interpreted as unsigned integers and their
-        difference, instead of wrapping, will be saturated to the lowest unsigned integer for
-        the controlling type (e.g. `0x00` for i8).
-        "#,
-            &formats.binary,
-        )
-        .operands_in(vec![x, y])
-        .operands_out(vec![a]),
-    );
-
-    ig.push(
-        Inst::new(
-            "ssub_sat",
-            r#"
-        Subtract with signed saturation.
-
-        This is similar to `isub` but the operands are interpreted as signed integers and their
-        difference, instead of wrapping, will be saturated to the lowest or highest
-        signed integer for the controlling type (e.g. `0x80` or `0x7F` for i8).
-        "#,
-            &formats.binary,
-        )
-        .operands_in(vec![x, y])
-        .operands_out(vec![a]),
-    );
-
-    ig.push(
-        Inst::new(
             "ineg",
             r#"
         Integer negation: `a := -x \pmod{2^B}`.
+        "#,
+            &formats.unary,
+        )
+        .operands_in(vec![x])
+        .operands_out(vec![a]),
+    );
+
+    ig.push(
+        Inst::new(
+            "iabs",
+            r#"
+        Integer absolute value with wrapping: `a := |x|`.
         "#,
             &formats.unary,
         )
@@ -2371,8 +2111,7 @@ pub(crate) fn define(
         Unsigned integer multiplication, producing the high half of a
         double-length result.
 
-        Polymorphic over all scalar integer types, but does not support vector
-        types.
+        Polymorphic over all integer types (vector and scalar).
         "#,
             &formats.binary,
         )
@@ -2387,13 +2126,39 @@ pub(crate) fn define(
         Signed integer multiplication, producing the high half of a
         double-length result.
 
-        Polymorphic over all scalar integer types, but does not support vector
-        types.
+        Polymorphic over all integer types (vector and scalar).
         "#,
             &formats.binary,
         )
         .operands_in(vec![x, y])
         .operands_out(vec![a]),
+    );
+
+    let I16or32 = &TypeVar::new(
+        "I16or32",
+        "A scalar or vector integer type with 16- or 32-bit numbers",
+        TypeSetBuilder::new().ints(16..32).simd_lanes(4..8).build(),
+    );
+
+    let qx = &Operand::new("x", I16or32);
+    let qy = &Operand::new("y", I16or32);
+    let qa = &Operand::new("a", I16or32);
+
+    ig.push(
+        Inst::new(
+            "sqmul_round_sat",
+            r#"
+        Fixed-point multiplication of numbers in the QN format, where N + 1
+        is the number bitwidth:
+        `a := signed_saturate((x * y + 1 << (Q - 1)) >> Q)`
+
+        Polymorphic over all integer types (scalar and vector) with 16- or
+        32-bit numbers.
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![qx, qy])
+        .operands_out(vec![qa]),
     );
 
     ig.push(
@@ -3231,6 +2996,9 @@ pub(crate) fn define(
         .operands_out(vec![a]),
     );
 
+    let x = &Operand::new("x", Int);
+    let a = &Operand::new("a", Int);
+
     ig.push(
         Inst::new(
             "popcnt",
@@ -3484,9 +3252,28 @@ pub(crate) fn define(
         Inst::new(
             "fmin",
             r#"
-        Floating point minimum, propagating NaNs.
+        Floating point minimum, propagating NaNs using the WebAssembly rules.
 
-        If either operand is NaN, this returns a NaN.
+        If either operand is NaN, this returns NaN with an unspecified sign. Furthermore, if
+        each input NaN consists of a mantissa whose most significant bit is 1 and the rest is
+        0, then the output has the same form. Otherwise, the output mantissa's most significant
+        bit is 1 and the rest is unspecified.
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![x, y])
+        .operands_out(vec![a]),
+    );
+
+    ig.push(
+        Inst::new(
+            "fmin_pseudo",
+            r#"
+        Floating point pseudo-minimum, propagating NaNs.  This behaves differently from ``fmin``.
+        See <https://github.com/WebAssembly/simd/pull/122> for background.
+
+        The behaviour is defined as ``fmin_pseudo(a, b) = (b < a) ? b : a``, and the behaviour
+        for zero or NaN inputs follows from the behaviour of ``<`` with such inputs.
         "#,
             &formats.binary,
         )
@@ -3500,9 +3287,28 @@ pub(crate) fn define(
         Inst::new(
             "fmax",
             r#"
-        Floating point maximum, propagating NaNs.
+        Floating point maximum, propagating NaNs using the WebAssembly rules.
 
-        If either operand is NaN, this returns a NaN.
+        If either operand is NaN, this returns NaN with an unspecified sign. Furthermore, if
+        each input NaN consists of a mantissa whose most significant bit is 1 and the rest is
+        0, then the output has the same form. Otherwise, the output mantissa's most significant
+        bit is 1 and the rest is unspecified.
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![x, y])
+        .operands_out(vec![a]),
+    );
+
+    ig.push(
+        Inst::new(
+            "fmax_pseudo",
+            r#"
+        Floating point pseudo-maximum, propagating NaNs.  This behaves differently from ``fmax``.
+        See <https://github.com/WebAssembly/simd/pull/122> for background.
+
+        The behaviour is defined as ``fmax_pseudo(a, b) = (a < b) ? b : a``, and the behaviour
+        for zero or NaN inputs follows from the behaviour of ``<`` with such inputs.
         "#,
             &formats.binary,
         )
@@ -3683,12 +3489,9 @@ pub(crate) fn define(
         Inst::new(
             "scalar_to_vector",
             r#"
-    Scalar To Vector -- move a value out of a scalar register and into a vector register; the
-    scalar will be moved to the lowest-order bits of the vector register. Note that this
-    instruction is intended as a low-level legalization instruction and frontends should prefer
-    insertlane; on certain architectures, scalar_to_vector may zero the highest-order bits for some
-    types (e.g. integers) but not for others (e.g. floats).
-    "#,
+            Copies a scalar value to a vector value.  The scalar is copied into the
+            least significant lane of the vector, and all other lanes will be zero.
+            "#,
             &formats.unary,
         )
         .operands_in(vec![s])
@@ -3729,8 +3532,7 @@ pub(crate) fn define(
             &formats.unary,
         )
         .operands_in(vec![x])
-        .operands_out(vec![a])
-        .constraints(vec![WiderOrEq(Bool.clone(), BoolTo.clone())]),
+        .operands_out(vec![a]),
     );
 
     let BoolTo = &TypeVar::new(
@@ -3757,8 +3559,7 @@ pub(crate) fn define(
             &formats.unary,
         )
         .operands_in(vec![x])
-        .operands_out(vec![a])
-        .constraints(vec![WiderOrEq(BoolTo.clone(), Bool.clone())]),
+        .operands_out(vec![a]),
     );
 
     let IntTo = &TypeVar::new(
@@ -3839,8 +3640,202 @@ pub(crate) fn define(
             &formats.unary,
         )
         .operands_in(vec![x])
-        .operands_out(vec![a])
-        .constraints(vec![WiderOrEq(Int.clone(), IntTo.clone())]),
+        .operands_out(vec![a]),
+    );
+
+    let I16or32or64xN = &TypeVar::new(
+        "I16or32or64xN",
+        "A SIMD vector type containing integer lanes 16, 32, or 64 bits wide",
+        TypeSetBuilder::new()
+            .ints(16..64)
+            .simd_lanes(2..8)
+            .includes_scalars(false)
+            .build(),
+    );
+
+    let x = &Operand::new("x", I16or32or64xN);
+    let y = &Operand::new("y", I16or32or64xN);
+    let a = &Operand::new("a", &I16or32or64xN.split_lanes());
+
+    ig.push(
+        Inst::new(
+            "snarrow",
+            r#"
+        Combine `x` and `y` into a vector with twice the lanes but half the integer width while
+        saturating overflowing values to the signed maximum and minimum.
+
+        The lanes will be concatenated after narrowing. For example, when `x` and `y` are `i32x4`
+        and `x = [x3, x2, x1, x0]` and `y = [y3, y2, y1, y0]`, then after narrowing the value
+        returned is an `i16x8`: `a = [y3', y2', y1', y0', x3', x2', x1', x0']`.
+            "#,
+            &formats.binary,
+        )
+        .operands_in(vec![x, y])
+        .operands_out(vec![a]),
+    );
+
+    ig.push(
+        Inst::new(
+            "unarrow",
+            r#"
+        Combine `x` and `y` into a vector with twice the lanes but half the integer width while
+        saturating overflowing values to the unsigned maximum and minimum.
+
+        Note that all input lanes are considered signed: any negative lanes will overflow and be
+        replaced with the unsigned minimum, `0x00`.
+
+        The lanes will be concatenated after narrowing. For example, when `x` and `y` are `i32x4`
+        and `x = [x3, x2, x1, x0]` and `y = [y3, y2, y1, y0]`, then after narrowing the value
+        returned is an `i16x8`: `a = [y3', y2', y1', y0', x3', x2', x1', x0']`.
+            "#,
+            &formats.binary,
+        )
+        .operands_in(vec![x, y])
+        .operands_out(vec![a]),
+    );
+
+    ig.push(
+        Inst::new(
+            "uunarrow",
+            r#"
+        Combine `x` and `y` into a vector with twice the lanes but half the integer width while
+        saturating overflowing values to the unsigned maximum and minimum.
+
+        Note that all input lanes are considered unsigned: any negative values will be interpreted as unsigned, overflowing and being replaced with the unsigned maximum.
+
+        The lanes will be concatenated after narrowing. For example, when `x` and `y` are `i32x4`
+        and `x = [x3, x2, x1, x0]` and `y = [y3, y2, y1, y0]`, then after narrowing the value
+        returned is an `i16x8`: `a = [y3', y2', y1', y0', x3', x2', x1', x0']`.
+            "#,
+            &formats.binary,
+        )
+        .operands_in(vec![x, y])
+        .operands_out(vec![a]),
+    );
+
+    let I8or16or32xN = &TypeVar::new(
+        "I8or16or32xN",
+        "A SIMD vector type containing integer lanes 8, 16, or 32 bits wide.",
+        TypeSetBuilder::new()
+            .ints(8..32)
+            .simd_lanes(4..16)
+            .includes_scalars(false)
+            .build(),
+    );
+
+    let x = &Operand::new("x", I8or16or32xN);
+    let a = &Operand::new("a", &I8or16or32xN.merge_lanes());
+
+    ig.push(
+        Inst::new(
+            "swiden_low",
+            r#"
+        Widen the low lanes of `x` using signed extension.
+
+        This will double the lane width and halve the number of lanes.
+            "#,
+            &formats.unary,
+        )
+        .operands_in(vec![x])
+        .operands_out(vec![a]),
+    );
+
+    ig.push(
+        Inst::new(
+            "swiden_high",
+            r#"
+        Widen the high lanes of `x` using signed extension.
+
+        This will double the lane width and halve the number of lanes.
+            "#,
+            &formats.unary,
+        )
+        .operands_in(vec![x])
+        .operands_out(vec![a]),
+    );
+
+    ig.push(
+        Inst::new(
+            "uwiden_low",
+            r#"
+        Widen the low lanes of `x` using unsigned extension.
+
+        This will double the lane width and halve the number of lanes.
+            "#,
+            &formats.unary,
+        )
+        .operands_in(vec![x])
+        .operands_out(vec![a]),
+    );
+
+    ig.push(
+        Inst::new(
+            "uwiden_high",
+            r#"
+            Widen the high lanes of `x` using unsigned extension.
+
+            This will double the lane width and halve the number of lanes.
+            "#,
+            &formats.unary,
+        )
+        .operands_in(vec![x])
+        .operands_out(vec![a]),
+    );
+
+    let x = &Operand::new("x", I8or16or32xN);
+    let y = &Operand::new("y", I8or16or32xN);
+    let a = &Operand::new("a", I8or16or32xN);
+
+    ig.push(
+        Inst::new(
+            "iadd_pairwise",
+            r#"
+        Does lane-wise integer pairwise addition on two operands, putting the
+        combined results into a single vector result. Here a pair refers to adjacent
+        lanes in a vector, i.e. i*2 + (i*2+1) for i == num_lanes/2. The first operand
+        pairwise add results will make up the low half of the resulting vector while
+        the second operand pairwise add results will make up the upper half of the
+        resulting vector.
+            "#,
+            &formats.binary,
+        )
+        .operands_in(vec![x, y])
+        .operands_out(vec![a]),
+    );
+
+    let I16x8 = &TypeVar::new(
+        "I16x8",
+        "A SIMD vector type containing 8 integer lanes each 16 bits wide.",
+        TypeSetBuilder::new()
+            .ints(16..16)
+            .simd_lanes(8..8)
+            .includes_scalars(false)
+            .build(),
+    );
+
+    let x = &Operand::new("x", I16x8);
+    let y = &Operand::new("y", I16x8);
+    let a = &Operand::new("a", &I16x8.merge_lanes());
+
+    ig.push(
+        Inst::new(
+            "widening_pairwise_dot_product_s",
+            r#"
+        Takes corresponding elements in `x` and `y`, performs a sign-extending length-doubling
+        multiplication on them, then adds adjacent pairs of elements to form the result.  For
+        example, if the input vectors are `[x3, x2, x1, x0]` and `[y3, y2, y1, y0]`, it produces
+        the vector `[r1, r0]`, where `r1 = sx(x3) * sx(y3) + sx(x2) * sx(y2)` and
+        `r0 = sx(x1) * sx(y1) + sx(x0) * sx(y0)`, and `sx(n)` sign-extends `n` to twice its width.
+
+        This will double the lane width and halve the number of lanes.  So the resulting
+        vector has the same number of bits as `x` and `y` do (individually).
+
+        See <https://github.com/WebAssembly/simd/pull/127> for background info.
+            "#,
+            &formats.binary,
+        )
+        .operands_in(vec![x, y])
+        .operands_out(vec![a]),
     );
 
     let IntTo = &TypeVar::new(
@@ -3871,8 +3866,7 @@ pub(crate) fn define(
             &formats.unary,
         )
         .operands_in(vec![x])
-        .operands_out(vec![a])
-        .constraints(vec![WiderOrEq(IntTo.clone(), Int.clone())]),
+        .operands_out(vec![a]),
     );
 
     ig.push(
@@ -3892,8 +3886,7 @@ pub(crate) fn define(
             &formats.unary,
         )
         .operands_in(vec![x])
-        .operands_out(vec![a])
-        .constraints(vec![WiderOrEq(IntTo.clone(), Int.clone())]),
+        .operands_out(vec![a]),
     );
 
     let FloatTo = &TypeVar::new(
@@ -3926,8 +3919,7 @@ pub(crate) fn define(
             &formats.unary,
         )
         .operands_in(vec![x])
-        .operands_out(vec![a])
-        .constraints(vec![WiderOrEq(FloatTo.clone(), Float.clone())]),
+        .operands_out(vec![a]),
     );
 
     ig.push(
@@ -3949,8 +3941,70 @@ pub(crate) fn define(
             &formats.unary,
         )
         .operands_in(vec![x])
-        .operands_out(vec![a])
-        .constraints(vec![WiderOrEq(Float.clone(), FloatTo.clone())]),
+        .operands_out(vec![a]),
+    );
+
+    let F64x2 = &TypeVar::new(
+        "F64x2",
+        "A SIMD vector type consisting of 2 lanes of 64-bit floats",
+        TypeSetBuilder::new()
+            .floats(64..64)
+            .simd_lanes(2..2)
+            .includes_scalars(false)
+            .build(),
+    );
+    let F32x4 = &TypeVar::new(
+        "F32x4",
+        "A SIMD vector type consisting of 4 lanes of 32-bit floats",
+        TypeSetBuilder::new()
+            .floats(32..32)
+            .simd_lanes(4..4)
+            .includes_scalars(false)
+            .build(),
+    );
+
+    let x = &Operand::new("x", F64x2);
+    let a = &Operand::new("a", F32x4);
+
+    ig.push(
+        Inst::new(
+            "fvdemote",
+            r#"
+                Convert `x` to a smaller floating point format.
+
+                Each lane in `x` is converted to the destination floating point format
+                by rounding to nearest, ties to even.
+
+                Cranelift currently only supports two floating point formats
+                - `f32` and `f64`. This may change in the future.
+
+                Fvdemote differs from fdemote in that with fvdemote it targets vectors.
+                Fvdemote is constrained to having the input type being F64x2 and the result
+                type being F32x4. The result lane that was the upper half of the input lane
+                is initialized to zero.
+                "#,
+            &formats.unary,
+        )
+        .operands_in(vec![x])
+        .operands_out(vec![a]),
+    );
+
+    ig.push(
+        Inst::new(
+            "fvpromote_low",
+            r#"
+        Converts packed single precision floating point to packed double precision floating point.
+
+        Considering only the lower half of the register, the low lanes in `x` are interpreted as
+        single precision floats that are then converted to a double precision floats.
+
+        The result type will have half the number of vector lanes as the input. Fvpromote_low is
+        constrained to input F32x4 with a result type of F64x2.
+        "#,
+            &formats.unary,
+        )
+        .operands_in(vec![a])
+        .operands_out(vec![x]),
     );
 
     let x = &Operand::new("x", Float);
@@ -4058,6 +4112,26 @@ pub(crate) fn define(
         .operands_out(vec![a]),
     );
 
+    ig.push(
+        Inst::new(
+            "fcvt_low_from_sint",
+            r#"
+        Converts packed signed 32-bit integers to packed double precision floating point.
+
+        Considering only the low half of the register, each lane in `x` is interpreted as a
+        signed 32-bit integer that is then converted to a double precision float. This
+        instruction differs from fcvt_from_sint in that it converts half the number of lanes
+        which are converted to occupy twice the number of bits. No rounding should be needed
+        for the resulting float.
+
+        The result type will have half the number of vector lanes as the input.
+        "#,
+            &formats.unary,
+        )
+        .operands_in(vec![x])
+        .operands_out(vec![a]),
+    );
+
     let WideInt = &TypeVar::new(
         "WideInt",
         "An integer type with lanes from `i16` upwards",
@@ -4085,8 +4159,7 @@ pub(crate) fn define(
             &formats.unary,
         )
         .operands_in(vec![x])
-        .operands_out(vec![lo, hi])
-        .is_ghost(true),
+        .operands_out(vec![lo, hi]),
     );
 
     let NarrowInt = &TypeVar::new(
@@ -4116,9 +4189,110 @@ pub(crate) fn define(
             &formats.binary,
         )
         .operands_in(vec![lo, hi])
-        .operands_out(vec![a])
-        .is_ghost(true),
+        .operands_out(vec![a]),
     );
 
-    ig.build()
+    // Instructions relating to atomic memory accesses and fences
+    let AtomicMem = &TypeVar::new(
+        "AtomicMem",
+        "Any type that can be stored in memory, which can be used in an atomic operation",
+        TypeSetBuilder::new().ints(8..64).build(),
+    );
+    let x = &Operand::new("x", AtomicMem).with_doc("Value to be atomically stored");
+    let a = &Operand::new("a", AtomicMem).with_doc("Value atomically loaded");
+    let e = &Operand::new("e", AtomicMem).with_doc("Expected value in CAS");
+    let p = &Operand::new("p", iAddr);
+    let MemFlags = &Operand::new("MemFlags", &imm.memflags);
+    let AtomicRmwOp = &Operand::new("AtomicRmwOp", &imm.atomic_rmw_op);
+
+    ig.push(
+        Inst::new(
+            "atomic_rmw",
+            r#"
+        Atomically read-modify-write memory at `p`, with second operand `x`.  The old value is
+        returned.  `p` has the type of the target word size, and `x` may be an integer type of
+        8, 16, 32 or 64 bits, even on a 32-bit target.  The type of the returned value is the
+        same as the type of `x`.  This operation is sequentially consistent and creates
+        happens-before edges that order normal (non-atomic) loads and stores.
+        "#,
+            &formats.atomic_rmw,
+        )
+        .operands_in(vec![MemFlags, AtomicRmwOp, p, x])
+        .operands_out(vec![a])
+        .can_load(true)
+        .can_store(true)
+        .other_side_effects(true),
+    );
+
+    ig.push(
+        Inst::new(
+            "atomic_cas",
+            r#"
+        Perform an atomic compare-and-swap operation on memory at `p`, with expected value `e`,
+        storing `x` if the value at `p` equals `e`.  The old value at `p` is returned,
+        regardless of whether the operation succeeds or fails.  `p` has the type of the target
+        word size, and `x` and `e` must have the same type and the same size, which may be an
+        integer type of 8, 16, 32 or 64 bits, even on a 32-bit target.  The type of the returned
+        value is the same as the type of `x` and `e`.  This operation is sequentially
+        consistent and creates happens-before edges that order normal (non-atomic) loads and
+        stores.
+        "#,
+            &formats.atomic_cas,
+        )
+        .operands_in(vec![MemFlags, p, e, x])
+        .operands_out(vec![a])
+        .can_load(true)
+        .can_store(true)
+        .other_side_effects(true),
+    );
+
+    ig.push(
+        Inst::new(
+            "atomic_load",
+            r#"
+        Atomically load from memory at `p`.
+
+        This is a polymorphic instruction that can load any value type which has a memory
+        representation.  It should only be used for integer types with 8, 16, 32 or 64 bits.
+        This operation is sequentially consistent and creates happens-before edges that order
+        normal (non-atomic) loads and stores.
+        "#,
+            &formats.load_no_offset,
+        )
+        .operands_in(vec![MemFlags, p])
+        .operands_out(vec![a])
+        .can_load(true)
+        .other_side_effects(true),
+    );
+
+    ig.push(
+        Inst::new(
+            "atomic_store",
+            r#"
+        Atomically store `x` to memory at `p`.
+
+        This is a polymorphic instruction that can store any value type with a memory
+        representation.  It should only be used for integer types with 8, 16, 32 or 64 bits.
+        This operation is sequentially consistent and creates happens-before edges that order
+        normal (non-atomic) loads and stores.
+        "#,
+            &formats.store_no_offset,
+        )
+        .operands_in(vec![MemFlags, x, p])
+        .can_store(true)
+        .other_side_effects(true),
+    );
+
+    ig.push(
+        Inst::new(
+            "fence",
+            r#"
+        A memory fence.  This must provide ordering to ensure that, at a minimum, neither loads
+        nor stores of any kind may move forwards or backwards across the fence.  This operation
+        is sequentially consistent.
+        "#,
+            &formats.nullary,
+        )
+        .other_side_effects(true),
+    );
 }

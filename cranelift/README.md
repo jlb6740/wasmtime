@@ -9,17 +9,16 @@ into executable machine code.
 
 [BA]: https://bytecodealliance.org/
 [![Build Status](https://github.com/bytecodealliance/wasmtime/workflows/CI/badge.svg)](https://github.com/bytecodealliance/wasmtime/actions)
-[![Fuzzit Status](https://app.fuzzit.dev/badge?org_id=bytecodealliance)](https://app.fuzzit.dev/orgs/bytecodealliance/dashboard)
 [![Chat](https://img.shields.io/badge/chat-zulip-brightgreen.svg)](https://bytecodealliance.zulipchat.com/#narrow/stream/217117-cranelift/topic/general)
 ![Minimum rustc 1.37](https://img.shields.io/badge/rustc-1.37+-green.svg)
 [![Documentation Status](https://docs.rs/cranelift/badge.svg)](https://docs.rs/cranelift)
 
 For more information, see [the documentation](docs/index.md).
 
-For an example of how to use the JIT, see the [SimpleJIT Demo], which
+For an example of how to use the JIT, see the [JIT Demo], which
 implements a toy language.
 
-[SimpleJIT Demo]: https://github.com/bytecodealliance/simplejit-demo
+[JIT Demo]: https://github.com/bytecodealliance/cranelift-jit-demo
 
 For an example of how to use Cranelift to run WebAssembly code, see
 [Wasmtime], which implements a standalone, embeddable, VM using Cranelift.
@@ -63,7 +62,7 @@ If you're interested in contributing to Cranelift: thank you! We have a
 [contributing guide] which will help you getting involved in the Cranelift
 project.
 
-[contributing guide](https://bytecodealliance.github.io/wasmtime/contributing.html)
+[contributing guide]: https://bytecodealliance.github.io/wasmtime/contributing.html
 
 Planned uses
 ------------

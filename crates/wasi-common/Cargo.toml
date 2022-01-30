@@ -1,6 +1,6 @@
 [package]
 name = "wasi-common"
-version = "0.18.0"
+version = "0.33.0"
 authors = ["The Wasmtime Project Developers"]
 description = "WASI implementation in Rust"
 license = "Apache-2.0 WITH LLVM-exception"
@@ -9,32 +9,28 @@ keywords = ["webassembly", "wasm"]
 repository = "https://github.com/bytecodealliance/wasmtime"
 readme = "README.md"
 edition = "2018"
-include = ["src/**/*", "LICENSE", "WASI/phases", "build.rs"]
+include = ["src/**/*", "WASI/phases/**/*", "README.md", "LICENSE", "build.rs"]
+build = "build.rs"
 
 # This doesn't actually link to a native library, but it allows us to set env
-# vars like `DEP_WASI_COMMON_18_*` for crates that have build scripts and depend
+# vars like `DEP_WASI_COMMON_19_*` for crates that have build scripts and depend
 # on this crate, allowing other crates to use the same witx files.
-links = "wasi-common-18"
+links = "wasi-common-19"
 
 [dependencies]
 anyhow = "1.0"
 thiserror = "1.0"
-libc = "0.2"
-getrandom = "0.1"
-cfg-if = "0.1.9"
-log = "0.4"
-filetime = "0.2.7"
-lazy_static = "1.4.0"
-wig = { path = "wig", version = "0.18.0" }
-wiggle = { path = "../wiggle", default-features = false, version = "0.18.0" }
+wiggle = { path = "../wiggle", default-features = false, version = "=0.33.0" }
+tracing = "0.1.19"
+cap-std = "0.22.0"
+cap-rand = "0.22.0"
+bitflags = "1.2"
 
 [target.'cfg(unix)'.dependencies]
-yanix = { path = "yanix", version = "0.18.0" }
+rustix = "0.31.0"
 
 [target.'cfg(windows)'.dependencies]
-winx = { path = "winx", version = "0.18.0" }
 winapi = "0.3"
-cpu-time = "1.0"
 
 [badges]
 maintenance = { status = "actively-developed" }
@@ -44,7 +40,7 @@ default = ["trace_log"]
 # This feature enables the `tracing` logs in the calls to target the `log`
 # ecosystem of backends (e.g. `env_logger`. Disable this if you want to use
 # `tracing-subscriber`.
-trace_log = [ "wiggle/tracing_log" ]
+trace_log = [ "wiggle/tracing_log", "tracing/log" ]
 # Need to make the wiggle_metadata feature available to consumers of this
 # crate if they want the snapshots to have metadata available.
 wiggle_metadata = ["wiggle/wiggle_metadata"]

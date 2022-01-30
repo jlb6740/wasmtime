@@ -65,9 +65,8 @@ use crate::ir;
 use crate::ir::entities::AnyEntity;
 use crate::ir::instructions::{BranchInfo, CallInfo, InstructionFormat, ResolvedConstraint};
 use crate::ir::{
-    types, ArgumentLoc, Block, Constant, FuncRef, Function, GlobalValue, Inst, InstructionData,
-    JumpTable, Opcode, SigRef, StackSlot, StackSlotKind, Type, Value, ValueDef, ValueList,
-    ValueLoc,
+    types, ArgumentPurpose, Block, Constant, FuncRef, Function, GlobalValue, Inst, JumpTable,
+    Opcode, SigRef, StackSlot, Type, Value, ValueDef, ValueList,
 };
 use crate::isa::TargetIsa;
 use crate::iterators::IteratorExtras;
@@ -78,22 +77,12 @@ use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
-use core::fmt::{self, Display, Formatter, Write};
-use log::debug;
-use thiserror::Error;
+use core::fmt::{self, Display, Formatter};
 
-pub use self::cssa::verify_cssa;
-pub use self::liveness::verify_liveness;
-pub use self::locations::verify_locations;
-
-mod cssa;
 mod flags;
-mod liveness;
-mod locations;
 
 /// A verifier error.
-#[derive(Error, Debug, PartialEq, Eq, Clone)]
-#[error("{}{}: {}", .location, format_context(.context), .message)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct VerifierError {
     /// The entity causing the verifier error.
     pub location: AnyEntity,
@@ -104,11 +93,16 @@ pub struct VerifierError {
     pub message: String,
 }
 
-/// Helper for formatting Verifier::Error context.
-fn format_context(context: &Option<String>) -> String {
-    match context {
-        None => "".to_string(),
-        Some(c) => format!(" ({})", c),
+// This is manually implementing Error and Display instead of using thiserror to reduce the amount
+// of dependencies used by Cranelift.
+impl std::error::Error for VerifierError {}
+
+impl Display for VerifierError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match &self.context {
+            None => write!(f, "{}: {}", self.location, self.message),
+            Some(context) => write!(f, "{} ({}): {}", self.location, context, self.message),
+        }
     }
 }
 
@@ -175,8 +169,12 @@ pub type VerifierStepResult<T> = Result<T, ()>;
 pub type VerifierResult<T> = Result<T, VerifierErrors>;
 
 /// List of verifier errors.
-#[derive(Error, Debug, Default, PartialEq, Eq, Clone)]
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub struct VerifierErrors(pub Vec<VerifierError>);
+
+// This is manually implementing Error and Display instead of using thiserror to reduce the amount
+// of dependencies used by Cranelift.
+impl std::error::Error for VerifierErrors {}
 
 impl VerifierErrors {
     /// Return a new `VerifierErrors` struct.
@@ -316,7 +314,7 @@ impl<'a> Verifier<'a> {
     /// Determine a contextual error string for an instruction.
     #[inline]
     fn context(&self, inst: Inst) -> String {
-        self.func.dfg.display_inst(inst, self.isa).to_string()
+        self.func.dfg.display_inst(inst).to_string()
     }
 
     // Check for:
@@ -433,14 +431,13 @@ impl<'a> Verifier<'a> {
                             .nonfatal((heap, format!("invalid bound global value {}", bound_gv)));
                     }
 
-                    let index_type = heap_data.index_type;
                     let bound_type = self.func.global_values[bound_gv].global_type(isa);
-                    if index_type != bound_type {
+                    if pointer_type != bound_type {
                         errors.report((
                             heap,
                             format!(
-                                "heap index type {} differs from the type of its bound, {}",
-                                index_type, bound_type
+                                "heap pointer type {} differs from the type of its bound, {}",
+                                pointer_type, bound_type
                             ),
                         ));
                     }
@@ -666,11 +663,6 @@ impl<'a> Verifier<'a> {
                 self.verify_block(inst, destination, errors)?;
                 self.verify_jump_table(inst, table, errors)?;
             }
-            BranchTableBase { table, .. }
-            | BranchTableEntry { table, .. }
-            | IndirectJump { table, .. } => {
-                self.verify_jump_table(inst, table, errors)?;
-            }
             Call {
                 func_ref, ref args, ..
             } => {
@@ -697,12 +689,6 @@ impl<'a> Verifier<'a> {
             }
             TableAddr { table, .. } => {
                 self.verify_table(inst, table, errors)?;
-            }
-            RegSpill { dst, .. } => {
-                self.verify_stack_slot(inst, dst, errors)?;
-            }
-            RegFill { src, .. } => {
-                self.verify_stack_slot(inst, src, errors)?;
             }
             LoadComplex { ref args, .. } => {
                 self.verify_value_list(inst, args, errors)?;
@@ -749,7 +735,11 @@ impl<'a> Verifier<'a> {
             }
 
             // Exhaustive list so we can't forget to add new formats
-            Unary { .. }
+            AtomicCas { .. }
+            | AtomicRmw { .. }
+            | LoadNoOffset { .. }
+            | StoreNoOffset { .. }
+            | Unary { .. }
             | UnaryConst { .. }
             | UnaryImm { .. }
             | UnaryIeee32 { .. }
@@ -769,9 +759,6 @@ impl<'a> Verifier<'a> {
             | IntSelect { .. }
             | Load { .. }
             | Store { .. }
-            | RegMove { .. }
-            | CopySpecial { .. }
-            | CopyToSsa { .. }
             | Trap { .. }
             | CondTrap { .. }
             | IntCondTrap { .. }
@@ -1229,9 +1216,6 @@ impl<'a> Verifier<'a> {
         let _ = self.typecheck_return(inst, errors);
         let _ = self.typecheck_special(inst, ctrl_type, errors);
 
-        // Misuses of copy_nop instructions are fatal
-        self.typecheck_copy_nop(inst, errors)?;
-
         Ok(())
     }
 
@@ -1371,7 +1355,6 @@ impl<'a> Verifier<'a> {
                     .iter()
                     .map(|a| a.value_type);
                 self.typecheck_variable_args_iterator(inst, arg_types, errors)?;
-                self.check_outgoing_args(inst, sig_ref, errors)?;
             }
             CallInfo::Indirect(sig_ref, _) => {
                 let arg_types = self.func.dfg.signatures[sig_ref]
@@ -1379,7 +1362,6 @@ impl<'a> Verifier<'a> {
                     .iter()
                     .map(|a| a.value_type);
                 self.typecheck_variable_args_iterator(inst, arg_types, errors)?;
-                self.check_outgoing_args(inst, sig_ref, errors)?;
             }
             CallInfo::NotACall => {}
         }
@@ -1421,81 +1403,11 @@ impl<'a> Verifier<'a> {
                 self.context(inst),
                 format!(
                     "mismatched argument count for `{}`: got {}, expected {}",
-                    self.func.dfg.display_inst(inst, None),
+                    self.func.dfg.display_inst(inst),
                     variable_args.len(),
                     i,
                 ),
             ));
-        }
-        Ok(())
-    }
-
-    /// Check the locations assigned to outgoing call arguments.
-    ///
-    /// When a signature has been legalized, all values passed as outgoing arguments on the stack
-    /// must be assigned to a matching `OutgoingArg` stack slot.
-    fn check_outgoing_args(
-        &self,
-        inst: Inst,
-        sig_ref: SigRef,
-        errors: &mut VerifierErrors,
-    ) -> VerifierStepResult<()> {
-        let sig = &self.func.dfg.signatures[sig_ref];
-
-        let args = self.func.dfg.inst_variable_args(inst);
-        let expected_args = &sig.params[..];
-
-        for (&arg, &abi) in args.iter().zip(expected_args) {
-            // Value types have already been checked by `typecheck_variable_args_iterator()`.
-            if let ArgumentLoc::Stack(offset) = abi.location {
-                let arg_loc = self.func.locations[arg];
-                if let ValueLoc::Stack(ss) = arg_loc {
-                    // Argument value is assigned to a stack slot as expected.
-                    self.verify_stack_slot(inst, ss, errors)?;
-                    let slot = &self.func.stack_slots[ss];
-                    if slot.kind != StackSlotKind::OutgoingArg {
-                        return errors.fatal((
-                            inst,
-                            self.context(inst),
-                            format!(
-                                "Outgoing stack argument {} in wrong stack slot: {} = {}",
-                                arg, ss, slot,
-                            ),
-                        ));
-                    }
-                    if slot.offset != Some(offset) {
-                        return errors.fatal((
-                            inst,
-                            self.context(inst),
-                            format!(
-                                "Outgoing stack argument {} should have offset {}: {} = {}",
-                                arg, offset, ss, slot,
-                            ),
-                        ));
-                    }
-                    if slot.size != abi.value_type.bytes() {
-                        return errors.fatal((
-                            inst,
-                            self.context(inst),
-                            format!(
-                                "Outgoing stack argument {} wrong size for {}: {} = {}",
-                                arg, abi.value_type, ss, slot,
-                            ),
-                        ));
-                    }
-                } else {
-                    let reginfo = self.isa.map(|i| i.register_info());
-                    return errors.fatal((
-                        inst,
-                        self.context(inst),
-                        format!(
-                            "Outgoing stack argument {} in wrong location: {}",
-                            arg,
-                            arg_loc.display(reginfo.as_ref())
-                        ),
-                    ));
-                }
-            }
         }
         Ok(())
     }
@@ -1635,52 +1547,6 @@ impl<'a> Verifier<'a> {
         Ok(())
     }
 
-    fn typecheck_copy_nop(
-        &self,
-        inst: Inst,
-        errors: &mut VerifierErrors,
-    ) -> VerifierStepResult<()> {
-        if let InstructionData::Unary {
-            opcode: Opcode::CopyNop,
-            arg,
-        } = self.func.dfg[inst]
-        {
-            let dst_vals = self.func.dfg.inst_results(inst);
-            if dst_vals.len() != 1 {
-                return errors.fatal((
-                    inst,
-                    self.context(inst),
-                    "copy_nop must produce exactly one result",
-                ));
-            }
-            let dst_val = dst_vals[0];
-            if self.func.dfg.value_type(dst_val) != self.func.dfg.value_type(arg) {
-                return errors.fatal((
-                    inst,
-                    self.context(inst),
-                    "copy_nop src and dst types must be the same",
-                ));
-            }
-            let src_loc = self.func.locations[arg];
-            let dst_loc = self.func.locations[dst_val];
-            let locs_ok = match (src_loc, dst_loc) {
-                (ValueLoc::Stack(src_slot), ValueLoc::Stack(dst_slot)) => src_slot == dst_slot,
-                _ => false,
-            };
-            if !locs_ok {
-                return errors.fatal((
-                    inst,
-                    self.context(inst),
-                    format!(
-                        "copy_nop must refer to identical stack slots, but found {:?} vs {:?}",
-                        src_loc, dst_loc,
-                    ),
-                ));
-            }
-        }
-        Ok(())
-    }
-
     fn cfg_integrity(
         &self,
         cfg: &ControlFlowGraph,
@@ -1753,145 +1619,6 @@ impl<'a> Verifier<'a> {
         errors.as_result()
     }
 
-    /// If the verifier has been set up with an ISA, make sure that the recorded encoding for the
-    /// instruction (if any) matches how the ISA would encode it.
-    fn verify_encoding(&self, inst: Inst, errors: &mut VerifierErrors) -> VerifierStepResult<()> {
-        // When the encodings table is empty, we don't require any instructions to be encoded.
-        //
-        // Once some instructions are encoded, we require all side-effecting instructions to have a
-        // legal encoding.
-        if self.func.encodings.is_empty() {
-            return Ok(());
-        }
-
-        let isa = match self.isa {
-            Some(isa) => isa,
-            None => return Ok(()),
-        };
-
-        let encoding = self.func.encodings[inst];
-        if encoding.is_legal() {
-            if self.func.dfg[inst].opcode().is_ghost() {
-                return errors.nonfatal((
-                    inst,
-                    self.context(inst),
-                    format!(
-                        "Ghost instruction has an encoding: {}",
-                        isa.encoding_info().display(encoding),
-                    ),
-                ));
-            }
-
-            let mut encodings = isa
-                .legal_encodings(
-                    &self.func,
-                    &self.func.dfg[inst],
-                    self.func.dfg.ctrl_typevar(inst),
-                )
-                .peekable();
-
-            if encodings.peek().is_none() {
-                return errors.nonfatal((
-                    inst,
-                    self.context(inst),
-                    format!(
-                        "Instruction failed to re-encode {}",
-                        isa.encoding_info().display(encoding),
-                    ),
-                ));
-            }
-
-            let has_valid_encoding = encodings.any(|possible_enc| encoding == possible_enc);
-
-            if !has_valid_encoding {
-                let mut possible_encodings = String::new();
-                let mut multiple_encodings = false;
-
-                for enc in isa.legal_encodings(
-                    &self.func,
-                    &self.func.dfg[inst],
-                    self.func.dfg.ctrl_typevar(inst),
-                ) {
-                    if !possible_encodings.is_empty() {
-                        possible_encodings.push_str(", ");
-                        multiple_encodings = true;
-                    }
-                    possible_encodings
-                        .write_fmt(format_args!("{}", isa.encoding_info().display(enc)))
-                        .unwrap();
-                }
-
-                return errors.nonfatal((
-                    inst,
-                    self.context(inst),
-                    format!(
-                        "encoding {} should be {}{}",
-                        isa.encoding_info().display(encoding),
-                        if multiple_encodings { "one of: " } else { "" },
-                        possible_encodings,
-                    ),
-                ));
-            }
-            return Ok(());
-        }
-
-        // Instruction is not encoded, so it is a ghost instruction.
-        // Instructions with side effects are not allowed to be ghost instructions.
-        let opcode = self.func.dfg[inst].opcode();
-
-        // The `fallthrough`, `fallthrough_return`, and `safepoint` instructions are not required
-        // to have an encoding.
-        if opcode == Opcode::Fallthrough
-            || opcode == Opcode::FallthroughReturn
-            || opcode == Opcode::Safepoint
-        {
-            return Ok(());
-        }
-
-        // Check if this opcode must be encoded.
-        let mut needs_enc = None;
-        if opcode.is_branch() {
-            needs_enc = Some("Branch");
-        } else if opcode.is_call() {
-            needs_enc = Some("Call");
-        } else if opcode.is_return() {
-            needs_enc = Some("Return");
-        } else if opcode.can_store() {
-            needs_enc = Some("Store");
-        } else if opcode.can_trap() {
-            needs_enc = Some("Trapping instruction");
-        } else if opcode.other_side_effects() {
-            needs_enc = Some("Instruction with side effects");
-        }
-
-        if let Some(text) = needs_enc {
-            // This instruction needs an encoding, so generate an error.
-            // Provide the ISA default encoding as a hint.
-            match self.func.encode(inst, isa) {
-                Ok(enc) => {
-                    return errors.nonfatal((
-                        inst,
-                        self.context(inst),
-                        format!(
-                            "{} must have an encoding (e.g., {})))",
-                            text,
-                            isa.encoding_info().display(enc),
-                        ),
-                    ));
-                }
-                Err(_) => {
-                    return errors.nonfatal((
-                        inst,
-                        self.context(inst),
-                        format!("{} must have an encoding", text),
-                    ))
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     fn immediate_constraints(
         &self,
         inst: Inst,
@@ -1941,24 +1668,6 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    fn verify_safepoint_unused(
-        &self,
-        inst: Inst,
-        errors: &mut VerifierErrors,
-    ) -> VerifierStepResult<()> {
-        if let Some(isa) = self.isa {
-            if !isa.flags().enable_safepoints() && self.func.dfg[inst].opcode() == Opcode::Safepoint
-            {
-                return errors.fatal((
-                    inst,
-                    self.context(inst),
-                    "safepoint instruction cannot be used when it is not enabled.",
-                ));
-            }
-        }
-        Ok(())
-    }
-
     fn typecheck_function_signature(&self, errors: &mut VerifierErrors) -> VerifierStepResult<()> {
         self.func
             .signature
@@ -1986,6 +1695,20 @@ impl<'a> Verifier<'a> {
                 ))
             });
 
+        self.func
+            .signature
+            .returns
+            .iter()
+            .enumerate()
+            .for_each(|(i, ret)| {
+                if let ArgumentPurpose::StructArgument(_) = ret.purpose {
+                    errors.report((
+                        AnyEntity::Function,
+                        format!("Return value at position {} can't be an struct argument", i),
+                    ))
+                }
+            });
+
         if errors.has_error() {
             Err(())
         } else {
@@ -2008,21 +1731,19 @@ impl<'a> Verifier<'a> {
             for inst in self.func.layout.block_insts(block) {
                 self.block_integrity(block, inst, errors)?;
                 self.instruction_integrity(inst, errors)?;
-                self.verify_safepoint_unused(inst, errors)?;
                 self.typecheck(inst, errors)?;
-                self.verify_encoding(inst, errors)?;
                 self.immediate_constraints(inst, errors)?;
             }
 
             self.encodable_as_bb(block, errors)?;
         }
 
-        verify_flags(self.func, &self.expected_cfg, self.isa, errors)?;
+        verify_flags(self.func, &self.expected_cfg, errors)?;
 
         if !errors.is_empty() {
-            debug!(
+            log::warn!(
                 "Found verifier errors in function:\n{}",
-                pretty_verifier_error(self.func, None, None, errors.clone())
+                pretty_verifier_error(self.func, None, errors.clone())
             );
         }
 
@@ -2045,10 +1766,7 @@ mod tests {
                 Some(&VerifierError { ref message, .. }) => {
                     if !message.contains($msg) {
                         #[cfg(feature = "std")]
-                        panic!(format!(
-                            "'{}' did not contain the substring '{}'",
-                            message, $msg
-                        ));
+                        panic!("'{}' did not contain the substring '{}'", message, $msg);
                         #[cfg(not(feature = "std"))]
                         panic!("error message did not contain the expected substring");
                     }

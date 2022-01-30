@@ -1,6 +1,6 @@
 use more_asserts::assert_gt;
 use std::{env, process};
-use wasi_tests::open_scratch_directory;
+use wasi_tests::{assert_errno, open_scratch_directory};
 
 unsafe fn test_file_seek_tell(dir_fd: wasi::Fd) {
     // Create a file in the scratch directory.
@@ -25,10 +25,10 @@ unsafe fn test_file_seek_tell(dir_fd: wasi::Fd) {
     assert_eq!(offset, 0, "current offset should be 0");
 
     // Write to file
-    let buf = &[0u8; 100];
+    let data = &[0u8; 100];
     let iov = wasi::Ciovec {
-        buf: buf.as_ptr() as *const _,
-        buf_len: buf.len(),
+        buf: data.as_ptr() as *const _,
+        buf_len: data.len(),
     };
     let nwritten = wasi::fd_write(file_fd, &[iov]).expect("writing to a file");
     assert_eq!(nwritten, 100, "should write 100 bytes to file");
@@ -57,13 +57,27 @@ unsafe fn test_file_seek_tell(dir_fd: wasi::Fd) {
     wasi::fd_seek(file_fd, 1000, wasi::WHENCE_CUR).expect("seeking beyond the end of the file");
 
     // Seek before byte 0 is an error though
-    assert_eq!(
+    assert_errno!(
         wasi::fd_seek(file_fd, -2000, wasi::WHENCE_CUR)
             .expect_err("seeking before byte 0 should be an error")
             .raw_error(),
-        wasi::ERRNO_INVAL,
-        "errno should be ERRNO_INVAL",
+        wasi::ERRNO_INVAL
     );
+
+    // Check that fd_read properly updates the file offset
+    wasi::fd_seek(file_fd, 0, wasi::WHENCE_SET)
+        .expect("seeking to the beginning of the file again");
+
+    let buffer = &mut [0u8; 100];
+    let iovec = wasi::Iovec {
+        buf: buffer.as_mut_ptr(),
+        buf_len: buffer.len(),
+    };
+    let nread = wasi::fd_read(file_fd, &[iovec]).expect("reading file");
+    assert_eq!(nread, buffer.len(), "should read {} bytes", buffer.len());
+
+    offset = wasi::fd_tell(file_fd).expect("getting file offset after reading");
+    assert_eq!(offset, 100, "offset after reading should be 100");
 
     wasi::fd_close(file_fd).expect("closing a file");
     wasi::path_unlink_file(dir_fd, "file").expect("deleting a file");

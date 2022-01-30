@@ -34,6 +34,7 @@ pub enum Token<'a> {
     Type(types::Type),    // i32, f32, b32x4, ...
     Value(Value),         // v12, v7
     Block(Block),         // block3
+    Cold,                 // cold (flag on block)
     StackSlot(u32),       // ss3
     GlobalValue(u32),     // gv3
     Heap(u32),            // heap2
@@ -179,10 +180,8 @@ impl<'a> Lexer<'a> {
     // Starting from `lookahead`, are we looking at a number?
     fn looking_at_numeric(&self) -> bool {
         if let Some(c) = self.lookahead {
-            if c.is_digit(10) {
-                return true;
-            }
             match c {
+                '0'..='9' => return true,
                 '-' => return true,
                 '+' => return true,
                 '.' => return true,
@@ -291,7 +290,7 @@ impl<'a> Lexer<'a> {
             match self.next_ch() {
                 Some('-') | Some('_') => {}
                 Some('.') => is_float = true,
-                Some(ch) if ch.is_alphanumeric() => {}
+                Some('0'..='9') | Some('a'..='z') | Some('A'..='Z') => {}
                 _ => break,
             }
         }
@@ -309,11 +308,10 @@ impl<'a> Lexer<'a> {
         let begin = self.pos;
         let loc = self.loc();
 
-        assert!(self.lookahead == Some('_') || self.lookahead.unwrap().is_alphabetic());
+        assert!(self.lookahead == Some('_') || self.lookahead.unwrap().is_ascii_alphabetic());
         loop {
             match self.next_ch() {
-                Some('_') => {}
-                Some(ch) if ch.is_alphanumeric() => {}
+                Some('_') | Some('0'..='9') | Some('a'..='z') | Some('A'..='Z') => {}
                 _ => break,
             }
         }
@@ -329,6 +327,7 @@ impl<'a> Lexer<'a> {
                 .unwrap_or_else(|| match text {
                     "iflags" => Token::Type(types::IFLAGS),
                     "fflags" => Token::Type(types::FFLAGS),
+                    "cold" => Token::Cold,
                     _ => Token::Identifier(text),
                 }),
             loc,
@@ -397,9 +396,10 @@ impl<'a> Lexer<'a> {
 
         assert_eq!(self.lookahead, Some('%'));
 
-        while let Some(c) = self.next_ch() {
-            if !(c.is_ascii() && c.is_alphanumeric() || c == '_') {
-                break;
+        loop {
+            match self.next_ch() {
+                Some('_') | Some('0'..='9') | Some('a'..='z') | Some('A'..='Z') => {}
+                _ => break,
             }
         }
 
@@ -489,8 +489,8 @@ impl<'a> Lexer<'a> {
                         Some(self.scan_number())
                     }
                 }
-                Some(ch) if ch.is_digit(10) => Some(self.scan_number()),
-                Some(ch) if ch.is_alphabetic() => {
+                Some('0'..='9') => Some(self.scan_number()),
+                Some('a'..='z') | Some('A'..='Z') => {
                     if self.looking_at("NaN") || self.looking_at("Inf") {
                         Some(self.scan_number())
                     } else {
@@ -501,7 +501,8 @@ impl<'a> Lexer<'a> {
                 Some('"') => Some(self.scan_string()),
                 Some('#') => Some(self.scan_hex_sequence()),
                 Some('@') => Some(self.scan_srcloc()),
-                Some(ch) if ch.is_whitespace() => {
+                // all ascii whitespace
+                Some(' ') | Some('\x09'..='\x0d') => {
                     self.next_ch();
                     continue;
                 }

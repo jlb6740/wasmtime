@@ -19,7 +19,7 @@
 
 "cranelift":
   - "cranelift/**"
-  
+
 "cranelift:area:machinst":
   - "cranelift/codegen/src/machinst/**"
 
@@ -28,10 +28,6 @@
 
 "cranelift:area:x64":
   - "cranelift/codegen/src/isa/x64/**"
-
-"cranelift:area:peepmatic":
-  - "cranelift/peepmatic/**"
-  - "cranelift/codegen/src/peepmatic.rs"
 
 "cranelift:docs":
   - "cranelift/docs/**"
@@ -53,8 +49,11 @@
   - "crates/fuzzing/**"
   - "fuzz/**"
 
-"lightbeam":
-  - "crates/lightbeam/**"
+"isle":
+  - "cranelift/isle/**"
+  - "**.isle"
+  - "cranelift/codegen/src/isa/x64/lower/isle.rs"
+  - "cranelift/codegen/src/isa/x64/lower/isle/**"
 
 "wasi":
   - "crates/wasi/**"
@@ -70,3 +69,7 @@
 "wasmtime:docs":
   - "*.md"
   - "docs/**"
+
+"wasmtime:ref-types":
+  - "crates/wasmtime/src/ref.rs"
+  - "crates/runtime/src/externref.rs"

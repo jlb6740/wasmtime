@@ -4,15 +4,14 @@ use wiggle::{GuestMemory, GuestPtr};
 use wiggle_test::{impl_errno, HostMemory, MemArea, WasiCtx};
 
 wiggle::from_witx!({
-    witx: ["tests/flags.witx"],
-    ctx: WasiCtx,
+    witx: ["$CARGO_MANIFEST_DIR/tests/flags.witx"],
 });
 
-impl_errno!(types::Errno, types::GuestErrorConversion);
+impl_errno!(types::Errno);
 
 impl<'a> flags::Flags for WasiCtx<'a> {
     fn configure_car(
-        &self,
+        &mut self,
         old_config: types::CarConfig,
         other_config_ptr: &GuestPtr<types::CarConfig>,
     ) -> Result<types::CarConfig, types::Errno> {
@@ -63,7 +62,7 @@ impl ConfigureCarExercise {
     }
 
     pub fn test(&self) {
-        let ctx = WasiCtx::new();
+        let mut ctx = WasiCtx::new();
         let host_memory = HostMemory::new();
 
         // Populate input ptr
@@ -73,13 +72,13 @@ impl ConfigureCarExercise {
             .expect("deref ptr mut to CarConfig");
 
         let res = flags::configure_car(
-            &ctx,
+            &mut ctx,
             &host_memory,
-            self.old_config.into(),
+            self.old_config.bits() as i32,
             self.other_config_by_ptr.ptr as i32,
             self.return_ptr_loc.ptr as i32,
         );
-        assert_eq!(res, types::Errno::Ok.into(), "configure car errno");
+        assert_eq!(res, Ok(types::Errno::Ok as i32), "configure car errno");
 
         let res_config = host_memory
             .ptr::<types::CarConfig>(self.return_ptr_loc.ptr)
@@ -103,11 +102,11 @@ proptest! {
 #[test]
 fn flags_fmt() {
     let empty = format!("{}", types::CarConfig::empty());
-    assert_eq!(empty, "empty (0x0)");
+    assert_eq!(empty, "CarConfig((empty) (0x0))");
     let one_flag = format!("{}", types::CarConfig::AWD);
-    assert_eq!(one_flag, "awd (0x2)");
+    assert_eq!(one_flag, "CarConfig(AWD (0x2))");
     let two_flags = format!("{}", types::CarConfig::AUTOMATIC | types::CarConfig::SUV);
-    assert_eq!(two_flags, "automatic|suv (0x5)");
+    assert_eq!(two_flags, "CarConfig(AUTOMATIC | SUV (0x5))");
     let all = format!("{}", types::CarConfig::all());
-    assert_eq!(all, "automatic|awd|suv (0x7)");
+    assert_eq!(all, "CarConfig(AUTOMATIC | AWD | SUV (0x7))");
 }

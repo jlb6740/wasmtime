@@ -1,24 +1,30 @@
 //! The module that implements the `wasmtime run` command.
 
-use crate::{init_file_per_thread_logger, CommonOptions};
-use anyhow::{bail, Context as _, Result};
+use crate::{CommonOptions, WasiModules};
+use anyhow::{anyhow, bail, Context as _, Result};
+use std::fs::File;
+use std::io::Read;
 use std::thread;
 use std::time::Duration;
 use std::{
     ffi::{OsStr, OsString},
-    fs::File,
-    path::{Component, PathBuf},
+    path::{Component, Path, PathBuf},
     process,
 };
 use structopt::{clap::AppSettings, StructOpt};
-use wasi_common::{preopen_dir, WasiCtxBuilder};
 use wasmtime::{Engine, Func, Linker, Module, Store, Trap, Val, ValType};
-use wasmtime_wasi::Wasi;
+use wasmtime_wasi::sync::{ambient_authority, Dir, WasiCtxBuilder};
+
+#[cfg(feature = "wasi-nn")]
+use wasmtime_wasi_nn::WasiNnCtx;
+
+#[cfg(feature = "wasi-crypto")]
+use wasmtime_wasi_crypto::WasiCryptoCtx;
 
 fn parse_module(s: &OsStr) -> Result<PathBuf, OsString> {
     // Do not accept wasmtime subcommand names as the module name
     match s.to_str() {
-        Some("help") | Some("config") | Some("run") | Some("wasm2obj") | Some("wast") => {
+        Some("help") | Some("config") | Some("run") | Some("wast") | Some("compile") => {
             Err("module name cannot be the same as a subcommand".into())
         }
         _ => Ok(s.into()),
@@ -59,12 +65,31 @@ fn parse_preloads(s: &str) -> Result<(String, PathBuf)> {
     Ok((parts[0].into(), parts[1].into()))
 }
 
+lazy_static::lazy_static! {
+    static ref AFTER_HELP: String = {
+        crate::FLAG_EXPLANATIONS.to_string()
+    };
+}
+
 /// Runs a WebAssembly module
 #[derive(StructOpt)]
-#[structopt(name = "run", setting = AppSettings::TrailingVarArg)]
+#[structopt(name = "run", setting = AppSettings::TrailingVarArg, after_help = AFTER_HELP.as_str())]
 pub struct RunCommand {
     #[structopt(flatten)]
     common: CommonOptions,
+
+    /// Allow unknown exports when running commands.
+    #[structopt(long = "allow-unknown-exports")]
+    allow_unknown_exports: bool,
+
+    /// Allow executing precompiled WebAssembly modules as `*.cwasm` files.
+    ///
+    /// Note that this option is not safe to pass if the module being passed in
+    /// is arbitrary user input. Only `wasmtime`-precompiled modules generated
+    /// via the `wasmtime compile` command or equivalent should be passed as an
+    /// argument with this option specified.
+    #[structopt(long = "allow-precompiled")]
+    allow_precompiled: bool,
 
     /// Grant access to the given host directory
     #[structopt(long = "dir", number_of_values = 1, value_name = "DIRECTORY")]
@@ -86,7 +111,7 @@ pub struct RunCommand {
     #[structopt(
         index = 1,
         required = true,
-        value_name = "WASM_MODULE",
+        value_name = "MODULE",
         parse(try_from_os_str = parse_module),
     )]
     module: PathBuf,
@@ -117,34 +142,38 @@ pub struct RunCommand {
 impl RunCommand {
     /// Executes the command.
     pub fn execute(&self) -> Result<()> {
-        if self.common.log_to_files {
-            let prefix = "wasmtime.dbg.";
-            init_file_per_thread_logger(prefix);
-        } else {
-            pretty_env_logger::init();
-        }
+        self.common.init_logging();
 
-        let mut config = self.common.config()?;
+        let mut config = self.common.config(None)?;
         if self.wasm_timeout.is_some() {
             config.interruptable(true);
         }
-        let engine = Engine::new(&config);
-        let store = Store::new(&engine);
+        let engine = Engine::new(&config)?;
+        let mut store = Store::new(&engine, Host::default());
 
         // Make wasi available by default.
         let preopen_dirs = self.compute_preopen_dirs()?;
         let argv = self.compute_argv();
 
-        let mut linker = Linker::new(&store);
-        populate_with_wasi(&mut linker, &preopen_dirs, &argv, &self.vars)?;
+        let mut linker = Linker::new(&engine);
+        linker.allow_unknown_exports(self.allow_unknown_exports);
+
+        populate_with_wasi(
+            &mut store,
+            &mut linker,
+            preopen_dirs,
+            &argv,
+            &self.vars,
+            &self.common.wasi_modules.unwrap_or(WasiModules::default()),
+        )?;
 
         // Load the preload wasm modules.
         for (name, path) in self.preloads.iter() {
             // Read the wasm module binary either as `*.wat` or a raw binary
-            let module = Module::from_file(&engine, path)?;
+            let module = self.load_module(&engine, path)?;
 
             // Add the module's functions to the linker.
-            linker.module(name, &module).context(format!(
+            linker.module(&mut store, name, &module).context(format!(
                 "failed to process preload `{}` at `{}`",
                 name,
                 path.display()
@@ -153,7 +182,7 @@ impl RunCommand {
 
         // Load the main wasm module.
         match self
-            .load_main_module(&mut linker)
+            .load_main_module(&mut store, &mut linker)
             .with_context(|| format!("failed to run main module `{}`", self.module.display()))
         {
             Ok(()) => (),
@@ -192,20 +221,21 @@ impl RunCommand {
         Ok(())
     }
 
-    fn compute_preopen_dirs(&self) -> Result<Vec<(String, File)>> {
+    fn compute_preopen_dirs(&self) -> Result<Vec<(String, Dir)>> {
         let mut preopen_dirs = Vec::new();
 
         for dir in self.dirs.iter() {
             preopen_dirs.push((
                 dir.clone(),
-                preopen_dir(dir).with_context(|| format!("failed to open directory '{}'", dir))?,
+                Dir::open_ambient_dir(dir, ambient_authority())
+                    .with_context(|| format!("failed to open directory '{}'", dir))?,
             ));
         }
 
         for (guest, host) in self.map_dirs.iter() {
             preopen_dirs.push((
                 guest.clone(),
-                preopen_dir(host)
+                Dir::open_ambient_dir(host, ambient_authority())
                     .with_context(|| format!("failed to open directory '{}'", host))?,
             ));
         }
@@ -236,9 +266,9 @@ impl RunCommand {
         result
     }
 
-    fn load_main_module(&self, linker: &mut Linker) -> Result<()> {
+    fn load_main_module(&self, store: &mut Store<Host>, linker: &mut Linker<Host>) -> Result<()> {
         if let Some(timeout) = self.wasm_timeout {
-            let handle = linker.store().interrupt_handle()?;
+            let handle = store.interrupt_handle()?;
             thread::spawn(move || {
                 thread::sleep(timeout);
                 handle.interrupt();
@@ -247,30 +277,39 @@ impl RunCommand {
 
         // Read the wasm module binary either as `*.wat` or a raw binary.
         // Use "" as a default module name.
-        let module = Module::from_file(linker.store().engine(), &self.module)?;
+        let module = self.load_module(linker.engine(), &self.module)?;
         linker
-            .module("", &module)
+            .module(&mut *store, "", &module)
             .context(format!("failed to instantiate {:?}", self.module))?;
 
         // If a function to invoke was given, invoke it.
         if let Some(name) = self.invoke.as_ref() {
-            self.invoke_export(linker, name)
+            self.invoke_export(store, linker, name)
         } else {
-            let func = linker.get_default("")?;
-            self.invoke_func(func, None)
+            let func = linker.get_default(&mut *store, "")?;
+            self.invoke_func(store, func, None)
         }
     }
 
-    fn invoke_export(&self, linker: &Linker, name: &str) -> Result<()> {
-        let func = match linker.get_one_by_name("", name)?.into_func() {
+    fn invoke_export(
+        &self,
+        store: &mut Store<Host>,
+        linker: &Linker<Host>,
+        name: &str,
+    ) -> Result<()> {
+        let func = match linker
+            .get(&mut *store, "", Some(name))
+            .ok_or_else(|| anyhow!("no export named `{}` found", name))?
+            .into_func()
+        {
             Some(func) => func,
             None => bail!("export of `{}` wasn't a function", name),
         };
-        self.invoke_func(func, Some(name))
+        self.invoke_func(store, func, Some(name))
     }
 
-    fn invoke_func(&self, func: Func, name: Option<&str>) -> Result<()> {
-        let ty = func.ty();
+    fn invoke_func(&self, store: &mut Store<Host>, func: Func, name: Option<&str>) -> Result<()> {
+        let ty = func.ty(&store);
         if ty.params().len() > 0 {
             eprintln!(
                 "warning: using `--invoke` with a function that takes arguments \
@@ -304,7 +343,8 @@ impl RunCommand {
 
         // Invoke the function and then afterwards print all the results that came
         // out, if there are any.
-        let results = func.call(&values).with_context(|| {
+        let mut results = vec![Val::null(); ty.results().len()];
+        func.call(store, &values, &mut results).with_context(|| {
             if let Some(name) = name {
                 format!("failed to invoke `{}`", name)
             } else {
@@ -318,52 +358,99 @@ impl RunCommand {
             );
         }
 
-        for result in results.into_vec() {
+        for result in results {
             match result {
                 Val::I32(i) => println!("{}", i),
                 Val::I64(i) => println!("{}", i),
-                Val::F32(f) => println!("{}", f),
-                Val::F64(f) => println!("{}", f),
+                Val::F32(f) => println!("{}", f32::from_bits(f)),
+                Val::F64(f) => println!("{}", f64::from_bits(f)),
                 Val::ExternRef(_) => println!("<externref>"),
-                Val::FuncRef(_) => println!("<externref>"),
+                Val::FuncRef(_) => println!("<funcref>"),
                 Val::V128(i) => println!("{}", i),
             }
         }
 
         Ok(())
     }
+
+    fn load_module(&self, engine: &Engine, path: &Path) -> Result<Module> {
+        // Peek at the first few bytes of the file to figure out if this is
+        // something we can pass off to `deserialize_file` which is fastest if
+        // we don't actually read the whole file into memory. Note that this
+        // behavior is disabled by default, though, because it's not safe to
+        // pass arbitrary user input to this command with `--allow-precompiled`
+        let mut file =
+            File::open(path).with_context(|| format!("failed to open: {}", path.display()))?;
+        let mut magic = [0; 4];
+        if let Ok(()) = file.read_exact(&mut magic) {
+            if &magic == b"\x7fELF" {
+                if self.allow_precompiled {
+                    return unsafe { Module::deserialize_file(engine, path) };
+                }
+                bail!(
+                    "cannot load precompiled module `{}` unless --allow-precompiled is passed",
+                    path.display()
+                )
+            }
+        }
+
+        Module::from_file(engine, path)
+    }
+}
+
+#[derive(Default)]
+struct Host {
+    wasi: Option<wasmtime_wasi::WasiCtx>,
+    #[cfg(feature = "wasi-nn")]
+    wasi_nn: Option<WasiNnCtx>,
+    #[cfg(feature = "wasi-crypto")]
+    wasi_crypto: Option<WasiCryptoCtx>,
 }
 
 /// Populates the given `Linker` with WASI APIs.
 fn populate_with_wasi(
-    linker: &mut Linker,
-    preopen_dirs: &[(String, File)],
+    store: &mut Store<Host>,
+    linker: &mut Linker<Host>,
+    preopen_dirs: Vec<(String, Dir)>,
     argv: &[String],
     vars: &[(String, String)],
+    wasi_modules: &WasiModules,
 ) -> Result<()> {
-    // Add the current snapshot to the linker.
-    let mut cx = WasiCtxBuilder::new();
-    cx.inherit_stdio().args(argv).envs(vars);
+    if wasi_modules.wasi_common {
+        wasmtime_wasi::add_to_linker(linker, |host| host.wasi.as_mut().unwrap())?;
 
-    for (name, file) in preopen_dirs {
-        cx.preopened_dir(file.try_clone()?, name);
+        let mut builder = WasiCtxBuilder::new();
+        builder = builder.inherit_stdio().args(argv)?.envs(vars)?;
+
+        for (name, dir) in preopen_dirs.into_iter() {
+            builder = builder.preopened_dir(dir, name)?;
+        }
+        store.data_mut().wasi = Some(builder.build());
     }
 
-    let cx = cx.build()?;
-    let wasi = Wasi::new(linker.store(), cx);
-    wasi.add_to_linker(linker)?;
-
-    // Repeat the above, but this time for snapshot 0.
-    let mut cx = wasi_common::old::snapshot_0::WasiCtxBuilder::new();
-    cx.inherit_stdio().args(argv).envs(vars);
-
-    for (name, file) in preopen_dirs {
-        cx.preopened_dir(file.try_clone()?, name);
+    if wasi_modules.wasi_nn {
+        #[cfg(not(feature = "wasi-nn"))]
+        {
+            bail!("Cannot enable wasi-nn when the binary is not compiled with this feature.");
+        }
+        #[cfg(feature = "wasi-nn")]
+        {
+            wasmtime_wasi_nn::add_to_linker(linker, |host| host.wasi_nn.as_mut().unwrap())?;
+            store.data_mut().wasi_nn = Some(WasiNnCtx::new()?);
+        }
     }
 
-    let cx = cx.build()?;
-    let wasi = wasmtime_wasi::old::snapshot_0::Wasi::new(linker.store(), cx);
-    wasi.add_to_linker(linker)?;
+    if wasi_modules.wasi_crypto {
+        #[cfg(not(feature = "wasi-crypto"))]
+        {
+            bail!("Cannot enable wasi-crypto when the binary is not compiled with this feature.");
+        }
+        #[cfg(feature = "wasi-crypto")]
+        {
+            wasmtime_wasi_crypto::add_to_linker(linker, |host| host.wasi_crypto.as_mut().unwrap())?;
+            store.data_mut().wasi_crypto = Some(WasiCryptoCtx::new());
+        }
+    }
 
     Ok(())
 }

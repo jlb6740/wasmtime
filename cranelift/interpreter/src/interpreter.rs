@@ -1,110 +1,76 @@
 //! Cranelift IR interpreter.
 //!
-//! This module contains the logic for interpreting Cranelift instructions.
+//! This module partially contains the logic for interpreting Cranelift IR.
 
-use crate::environment::Environment;
+use crate::address::{Address, AddressRegion, AddressSize};
+use crate::environment::{FuncIndex, FunctionStore};
 use crate::frame::Frame;
-use crate::interpreter::Trap::InvalidType;
-use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{
-    Block, FuncRef, Function, Inst, InstructionData, InstructionData::*, Opcode, Opcode::*, Type,
-    Value as ValueRef, ValueList,
-};
-use cranelift_reader::{DataValue, DataValueCastFailure};
+use crate::instruction::DfgInstructionContext;
+use crate::state::{MemoryError, State};
+use crate::step::{step, ControlFlow, StepError};
+use crate::value::ValueError;
+use cranelift_codegen::data_value::DataValue;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+use cranelift_codegen::ir::{Block, FuncRef, Function, StackSlot, Type, Value as ValueRef};
 use log::trace;
-use std::ops::{Add, Div, Mul, Sub};
+use std::collections::HashSet;
+use std::fmt::Debug;
+use std::iter;
 use thiserror::Error;
 
-/// The valid control flow states.
-pub enum ControlFlow {
-    Continue,
-    ContinueAt(Block, Vec<ValueRef>),
-    Return(Vec<DataValue>),
+/// The Cranelift interpreter; this contains some high-level functions to control the interpreter's
+/// flow. The interpreter state is defined separately (see [InterpreterState]) as the execution
+/// semantics for each Cranelift instruction (see [step]).
+pub struct Interpreter<'a> {
+    state: InterpreterState<'a>,
+    fuel: Option<u64>,
 }
 
-impl ControlFlow {
-    /// For convenience, we can unwrap the [ControlFlow] state assuming that it is a
-    /// [ControlFlow::Return], panicking otherwise.
-    pub fn unwrap_return(self) -> Vec<DataValue> {
-        if let ControlFlow::Return(values) = self {
-            values
-        } else {
-            panic!("expected the control flow to be in the return state")
-        }
+impl<'a> Interpreter<'a> {
+    pub fn new(state: InterpreterState<'a>) -> Self {
+        Self { state, fuel: None }
     }
-}
 
-/// The ways interpretation can fail.
-#[derive(Error, Debug)]
-pub enum Trap {
-    #[error("unknown trap")]
-    Unknown,
-    #[error("invalid type for {1}: expected {0}")]
-    InvalidType(String, ValueRef),
-    #[error("invalid cast")]
-    InvalidCast(#[from] DataValueCastFailure),
-    #[error("the instruction is not implemented (perhaps for the given types): {0}")]
-    Unsupported(Inst),
-    #[error("reached an unreachable statement")]
-    Unreachable,
-    #[error("invalid control flow: {0}")]
-    InvalidControlFlow(String),
-    #[error("invalid function reference: {0}")]
-    InvalidFunctionReference(FuncRef),
-    #[error("invalid function name: {0}")]
-    InvalidFunctionName(String),
-}
-
-/// The Cranelift interpreter; it contains immutable elements such as the function environment and
-/// implements the Cranelift IR semantics.
-#[derive(Default)]
-pub struct Interpreter {
-    pub env: Environment,
-}
-
-/// Helper for more concise matching.
-macro_rules! binary_op {
-    ( $op:path[$arg1:ident, $arg2:ident]; [ $( $data_value_ty:ident ),* ]; $inst:ident ) => {
-        match ($arg1, $arg2) {
-            $( (DataValue::$data_value_ty(a), DataValue::$data_value_ty(b)) => { Ok(DataValue::$data_value_ty($op(a, b))) } )*
-            _ => Err(Trap::Unsupported($inst)),
-        }
-    };
-}
-
-impl Interpreter {
-    /// Construct a new [Interpreter] using the given [Environment].
-    pub fn new(env: Environment) -> Self {
-        Self { env }
+    /// The `fuel` mechanism sets a number of instructions that
+    /// the interpreter can execute before stopping. If this
+    /// value is `None` (the default), no limit is imposed.
+    pub fn with_fuel(self, fuel: Option<u64>) -> Self {
+        Self { fuel, ..self }
     }
 
     /// Call a function by name; this is a helpful proxy for [Interpreter::call_by_index].
     pub fn call_by_name(
-        &self,
+        &mut self,
         func_name: &str,
         arguments: &[DataValue],
-    ) -> Result<ControlFlow, Trap> {
-        let func_ref = self
-            .env
+    ) -> Result<ControlFlow<'a, DataValue>, InterpreterError> {
+        let index = self
+            .state
+            .functions
             .index_of(func_name)
-            .ok_or_else(|| Trap::InvalidFunctionName(func_name.to_string()))?;
-        self.call_by_index(func_ref, arguments)
+            .ok_or_else(|| InterpreterError::UnknownFunctionName(func_name.to_string()))?;
+        self.call_by_index(index, arguments)
     }
 
-    /// Call a function by its index in the [Environment]; this is a proxy for [Interpreter::call].
+    /// Call a function by its index in the [FunctionStore]; this is a proxy for
+    /// `Interpreter::call`.
     pub fn call_by_index(
-        &self,
-        func_ref: FuncRef,
+        &mut self,
+        index: FuncIndex,
         arguments: &[DataValue],
-    ) -> Result<ControlFlow, Trap> {
-        match self.env.get_by_func_ref(func_ref) {
-            None => Err(Trap::InvalidFunctionReference(func_ref)),
+    ) -> Result<ControlFlow<'a, DataValue>, InterpreterError> {
+        match self.state.functions.get_by_index(index) {
+            None => Err(InterpreterError::UnknownFunctionIndex(index)),
             Some(func) => self.call(func, arguments),
         }
     }
 
     /// Interpret a call to a [Function] given its [DataValue] arguments.
-    fn call(&self, function: &Function, arguments: &[DataValue]) -> Result<ControlFlow, Trap> {
+    fn call(
+        &mut self,
+        function: &'a Function,
+        arguments: &[DataValue],
+    ) -> Result<ControlFlow<'a, DataValue>, InterpreterError> {
         trace!("Call: {}({:?})", function.name, arguments);
         let first_block = function
             .layout
@@ -112,240 +78,286 @@ impl Interpreter {
             .next()
             .expect("to have a first block");
         let parameters = function.dfg.block_params(first_block);
-        let mut frame = Frame::new(function);
-        frame.set_all(parameters, arguments.to_vec());
-        self.block(&mut frame, first_block)
+        self.state.push_frame(function);
+        self.state
+            .current_frame_mut()
+            .set_all(parameters, arguments.to_vec());
+
+        self.block(first_block)
     }
 
     /// Interpret a [Block] in a [Function]. This drives the interpretation over sequences of
     /// instructions, which may continue in other blocks, until the function returns.
-    fn block(&self, frame: &mut Frame, block: Block) -> Result<ControlFlow, Trap> {
+    fn block(&mut self, block: Block) -> Result<ControlFlow<'a, DataValue>, InterpreterError> {
         trace!("Block: {}", block);
-        let layout = &frame.function.layout;
+        let function = self.state.current_frame_mut().function;
+        let layout = &function.layout;
         let mut maybe_inst = layout.first_inst(block);
         while let Some(inst) = maybe_inst {
-            match self.inst(frame, inst)? {
+            if self.consume_fuel() == FuelResult::Stop {
+                return Err(InterpreterError::FuelExhausted);
+            }
+
+            let inst_context = DfgInstructionContext::new(inst, &function.dfg);
+            match step(&mut self.state, inst_context)? {
+                ControlFlow::Assign(values) => {
+                    self.state
+                        .current_frame_mut()
+                        .set_all(function.dfg.inst_results(inst), values.to_vec());
+                    maybe_inst = layout.next_inst(inst)
+                }
                 ControlFlow::Continue => maybe_inst = layout.next_inst(inst),
-                ControlFlow::ContinueAt(block, old_names) => {
+                ControlFlow::ContinueAt(block, block_arguments) => {
                     trace!("Block: {}", block);
-                    let new_names = frame.function.dfg.block_params(block);
-                    frame.rename(&old_names, new_names);
+                    self.state
+                        .current_frame_mut()
+                        .set_all(function.dfg.block_params(block), block_arguments.to_vec());
                     maybe_inst = layout.first_inst(block)
                 }
-                ControlFlow::Return(rs) => return Ok(ControlFlow::Return(rs)),
+                ControlFlow::Call(called_function, arguments) => {
+                    let returned_arguments =
+                        self.call(called_function, &arguments)?.unwrap_return();
+                    self.state
+                        .current_frame_mut()
+                        .set_all(function.dfg.inst_results(inst), returned_arguments);
+                    maybe_inst = layout.next_inst(inst)
+                }
+                ControlFlow::Return(returned_values) => {
+                    self.state.pop_frame();
+                    return Ok(ControlFlow::Return(returned_values));
+                }
+                ControlFlow::Trap(trap) => return Ok(ControlFlow::Trap(trap)),
             }
         }
-        Err(Trap::Unreachable)
+        Err(InterpreterError::Unreachable)
     }
 
-    /// Interpret a single [instruction](Inst). This contains a `match`-based dispatch to the
-    /// implementations.
-    fn inst(&self, frame: &mut Frame, inst: Inst) -> Result<ControlFlow, Trap> {
-        use ControlFlow::{Continue, ContinueAt};
-        trace!("Inst: {}", &frame.function.dfg.display_inst(inst, None));
-
-        let data = &frame.function.dfg[inst];
-        match data {
-            Binary { opcode, args } => {
-                let arg1 = frame.get(&args[0]);
-                let arg2 = frame.get(&args[1]);
-                let result = match opcode {
-                    Iadd => binary_op!(Add::add[arg1, arg2]; [I8, I16, I32, I64]; inst),
-                    Isub => binary_op!(Sub::sub[arg1, arg2]; [I8, I16, I32, I64]; inst),
-                    Imul => binary_op!(Mul::mul[arg1, arg2]; [I8, I16, I32, I64]; inst),
-                    Fadd => binary_op!(Add::add[arg1, arg2]; [F32, F64]; inst),
-                    Fsub => binary_op!(Sub::sub[arg1, arg2]; [F32, F64]; inst),
-                    Fmul => binary_op!(Mul::mul[arg1, arg2]; [F32, F64]; inst),
-                    Fdiv => binary_op!(Div::div[arg1, arg2]; [F32, F64]; inst),
-                    _ => unimplemented!("interpreter does not support opcode yet: {}", opcode),
-                }?;
-                frame.set(first_result(frame.function, inst), result);
-                Ok(Continue)
+    fn consume_fuel(&mut self) -> FuelResult {
+        match self.fuel {
+            Some(0) => FuelResult::Stop,
+            Some(ref mut n) => {
+                *n -= 1;
+                FuelResult::Continue
             }
 
-            BinaryImm64 { opcode, arg, imm } => {
-                let imm = DataValue::from_integer(*imm, type_of(*arg, frame.function))?;
-                let arg = frame.get(&arg);
-                let result = match opcode {
-                    IaddImm => binary_op!(Add::add[arg, imm]; [I8, I16, I32, I64]; inst),
-                    IrsubImm => binary_op!(Sub::sub[imm, arg]; [I8, I16, I32, I64]; inst),
-                    ImulImm => binary_op!(Mul::mul[arg, imm]; [I8, I16, I32, I64]; inst),
-                    _ => unimplemented!("interpreter does not support opcode yet: {}", opcode),
-                }?;
-                frame.set(first_result(frame.function, inst), result);
-                Ok(Continue)
-            }
-
-            Branch {
-                opcode,
-                args,
-                destination,
-            } => match opcode {
-                Brnz => {
-                    let mut args = value_refs(frame.function, args);
-                    let first = args.remove(0);
-                    match frame.get(&first) {
-                        DataValue::B(false)
-                        | DataValue::I8(0)
-                        | DataValue::I16(0)
-                        | DataValue::I32(0)
-                        | DataValue::I64(0) => Ok(Continue),
-                        DataValue::B(true)
-                        | DataValue::I8(_)
-                        | DataValue::I16(_)
-                        | DataValue::I32(_)
-                        | DataValue::I64(_) => Ok(ContinueAt(*destination, args)),
-                        _ => Err(Trap::InvalidType("boolean or integer".to_string(), args[0])),
-                    }
-                }
-                _ => unimplemented!("interpreter does not support opcode yet: {}", opcode),
-            },
-            InstructionData::Call { args, func_ref, .. } => {
-                // Find the function to call.
-                let func_name = function_name_of_func_ref(*func_ref, frame.function);
-
-                // Call function.
-                let args = frame.get_all(args.as_slice(&frame.function.dfg.value_lists));
-                let result = self.call_by_name(&func_name, &args)?;
-
-                // Save results.
-                if let ControlFlow::Return(returned_values) = result {
-                    let ssa_values = frame.function.dfg.inst_results(inst);
-                    assert_eq!(
-                        ssa_values.len(),
-                        returned_values.len(),
-                        "expected result length ({}) to match SSA values length ({}): {}",
-                        returned_values.len(),
-                        ssa_values.len(),
-                        frame.function.dfg.display_inst(inst, None)
-                    );
-                    frame.set_all(ssa_values, returned_values);
-                    Ok(Continue)
-                } else {
-                    Err(Trap::InvalidControlFlow(format!(
-                        "did not return from: {}",
-                        frame.function.dfg.display_inst(inst, None)
-                    )))
-                }
-            }
-            InstructionData::Jump {
-                opcode,
-                destination,
-                args,
-            } => match opcode {
-                Opcode::Fallthrough => {
-                    Ok(ContinueAt(*destination, value_refs(frame.function, args)))
-                }
-                Opcode::Jump => Ok(ContinueAt(*destination, value_refs(frame.function, args))),
-                _ => unimplemented!("interpreter does not support opcode yet: {}", opcode),
-            },
-            IntCompareImm {
-                opcode,
-                arg,
-                cond,
-                imm,
-            } => match opcode {
-                IcmpImm => {
-                    let arg_value = match *frame.get(arg) {
-                        DataValue::I8(i) => Ok(i as i64),
-                        DataValue::I16(i) => Ok(i as i64),
-                        DataValue::I32(i) => Ok(i as i64),
-                        DataValue::I64(i) => Ok(i),
-                        _ => Err(InvalidType("integer".to_string(), *arg)),
-                    }?;
-                    let imm_value = (*imm).into();
-                    let result = match cond {
-                        IntCC::UnsignedLessThanOrEqual => arg_value <= imm_value,
-                        IntCC::Equal => arg_value == imm_value,
-                        _ => unimplemented!(
-                            "interpreter does not support condition code yet: {}",
-                            cond
-                        ),
-                    };
-                    let res = first_result(frame.function, inst);
-                    frame.set(res, DataValue::B(result));
-                    Ok(Continue)
-                }
-                _ => unimplemented!("interpreter does not support opcode yet: {}", opcode),
-            },
-            MultiAry { opcode, args } => match opcode {
-                Return => {
-                    let rs: Vec<DataValue> = args
-                        .as_slice(&frame.function.dfg.value_lists)
-                        .iter()
-                        .map(|r| frame.get(r).clone())
-                        .collect();
-                    Ok(ControlFlow::Return(rs))
-                }
-                _ => unimplemented!("interpreter does not support opcode yet: {}", opcode),
-            },
-            NullAry { opcode } => match opcode {
-                Nop => Ok(Continue),
-                _ => unimplemented!("interpreter does not support opcode yet: {}", opcode),
-            },
-            UnaryImm { opcode, imm } => match opcode {
-                Iconst => {
-                    let res = first_result(frame.function, inst);
-                    let imm_value = DataValue::from_integer(*imm, type_of(res, frame.function))?;
-                    frame.set(res, imm_value);
-                    Ok(Continue)
-                }
-                _ => unimplemented!("interpreter does not support opcode yet: {}", opcode),
-            },
-            UnaryBool { opcode, imm } => match opcode {
-                Bconst => {
-                    let res = first_result(frame.function, inst);
-                    frame.set(res, DataValue::B(*imm));
-                    Ok(Continue)
-                }
-                _ => unimplemented!("interpreter does not support opcode yet: {}", opcode),
-            },
-
-            _ => unimplemented!("interpreter does not support instruction yet: {:?}", data),
+            // We do not have fuel enabled, so unconditionally continue
+            None => FuelResult::Continue,
         }
     }
 }
 
-/// Return the first result of an instruction.
-///
-/// This helper cushions the interpreter from changes to the [Function] API.
-#[inline]
-fn first_result(function: &Function, inst: Inst) -> ValueRef {
-    function.dfg.first_result(inst)
+#[derive(Debug, PartialEq, Clone)]
+/// The result of consuming fuel. Signals if the caller should stop or continue.
+pub enum FuelResult {
+    /// We still have `fuel` available and should continue execution.
+    Continue,
+    /// The available `fuel` has been exhausted, we should stop now.
+    Stop,
 }
 
-/// Return a list of IR values as a vector.
-///
-/// This helper cushions the interpreter from changes to the [Function] API.
-#[inline]
-fn value_refs(function: &Function, args: &ValueList) -> Vec<ValueRef> {
-    args.as_slice(&function.dfg.value_lists).to_vec()
+/// The ways interpretation can fail.
+#[derive(Error, Debug)]
+pub enum InterpreterError {
+    #[error("failed to interpret instruction")]
+    StepError(#[from] StepError),
+    #[error("reached an unreachable statement")]
+    Unreachable,
+    #[error("unknown function index (has it been added to the function store?): {0}")]
+    UnknownFunctionIndex(FuncIndex),
+    #[error("unknown function with name (has it been added to the function store?): {0}")]
+    UnknownFunctionName(String),
+    #[error("value error")]
+    ValueError(#[from] ValueError),
+    #[error("fuel exhausted")]
+    FuelExhausted,
 }
 
-/// Return the (external) function name of `func_ref` in a local `function`. Note that this may
-/// be truncated.
-///
-/// This helper cushions the interpreter from changes to the [Function] API.
-#[inline]
-fn function_name_of_func_ref(func_ref: FuncRef, function: &Function) -> String {
-    function
-        .dfg
-        .ext_funcs
-        .get(func_ref)
-        .expect("function to exist")
-        .name
-        .to_string()
+/// Maintains the [Interpreter]'s state, implementing the [State] trait.
+pub struct InterpreterState<'a> {
+    pub functions: FunctionStore<'a>,
+    pub frame_stack: Vec<Frame<'a>>,
+    /// Number of bytes from the bottom of the stack where the current frame's stack space is
+    pub frame_offset: usize,
+    pub stack: Vec<u8>,
+    pub heap: Vec<u8>,
+    pub iflags: HashSet<IntCC>,
+    pub fflags: HashSet<FloatCC>,
 }
 
-/// Helper for calculating the type of an IR value. TODO move to Frame?
-#[inline]
-fn type_of(value: ValueRef, function: &Function) -> Type {
-    function.dfg.value_type(value)
+impl Default for InterpreterState<'_> {
+    fn default() -> Self {
+        Self {
+            functions: FunctionStore::default(),
+            frame_stack: vec![],
+            frame_offset: 0,
+            stack: Vec::with_capacity(1024),
+            heap: vec![0; 1024],
+            iflags: HashSet::new(),
+            fflags: HashSet::new(),
+        }
+    }
+}
+
+impl<'a> InterpreterState<'a> {
+    pub fn with_function_store(self, functions: FunctionStore<'a>) -> Self {
+        Self { functions, ..self }
+    }
+
+    fn current_frame_mut(&mut self) -> &mut Frame<'a> {
+        let num_frames = self.frame_stack.len();
+        match num_frames {
+            0 => panic!("unable to retrieve the current frame because no frames were pushed"),
+            _ => &mut self.frame_stack[num_frames - 1],
+        }
+    }
+
+    fn current_frame(&self) -> &Frame<'a> {
+        let num_frames = self.frame_stack.len();
+        match num_frames {
+            0 => panic!("unable to retrieve the current frame because no frames were pushed"),
+            _ => &self.frame_stack[num_frames - 1],
+        }
+    }
+}
+
+impl<'a> State<'a, DataValue> for InterpreterState<'a> {
+    fn get_function(&self, func_ref: FuncRef) -> Option<&'a Function> {
+        self.functions
+            .get_from_func_ref(func_ref, self.frame_stack.last().unwrap().function)
+    }
+    fn get_current_function(&self) -> &'a Function {
+        self.current_frame().function
+    }
+
+    fn push_frame(&mut self, function: &'a Function) {
+        if let Some(frame) = self.frame_stack.iter().last() {
+            self.frame_offset += frame.function.stack_size() as usize;
+        }
+
+        // Grow the stack by the space necessary for this frame
+        self.stack
+            .extend(iter::repeat(0).take(function.stack_size() as usize));
+
+        self.frame_stack.push(Frame::new(function));
+    }
+    fn pop_frame(&mut self) {
+        if let Some(frame) = self.frame_stack.pop() {
+            // Shorten the stack after exiting the frame
+            self.stack
+                .truncate(self.stack.len() - frame.function.stack_size() as usize);
+
+            // Reset frame_offset to the start of this function
+            if let Some(frame) = self.frame_stack.iter().last() {
+                self.frame_offset -= frame.function.stack_size() as usize;
+            }
+        }
+    }
+
+    fn get_value(&self, name: ValueRef) -> Option<DataValue> {
+        Some(self.current_frame().get(name).clone()) // TODO avoid clone?
+    }
+
+    fn set_value(&mut self, name: ValueRef, value: DataValue) -> Option<DataValue> {
+        self.current_frame_mut().set(name, value)
+    }
+
+    fn has_iflag(&self, flag: IntCC) -> bool {
+        self.iflags.contains(&flag)
+    }
+
+    fn has_fflag(&self, flag: FloatCC) -> bool {
+        self.fflags.contains(&flag)
+    }
+
+    fn set_iflag(&mut self, flag: IntCC) {
+        self.iflags.insert(flag);
+    }
+
+    fn set_fflag(&mut self, flag: FloatCC) {
+        self.fflags.insert(flag);
+    }
+
+    fn clear_flags(&mut self) {
+        self.iflags.clear();
+        self.fflags.clear()
+    }
+
+    fn stack_address(
+        &self,
+        size: AddressSize,
+        slot: StackSlot,
+        offset: u64,
+    ) -> Result<Address, MemoryError> {
+        let stack_slots = &self.get_current_function().stack_slots;
+        let stack_slot = &stack_slots[slot];
+
+        // offset must be `0 <= Offset < sizeof(SS)`
+        if offset >= stack_slot.size as u64 {
+            return Err(MemoryError::InvalidOffset {
+                offset,
+                max: stack_slot.size as u64,
+            });
+        }
+
+        // Calculate the offset from the current frame to the requested stack slot
+        let slot_offset: u64 = stack_slots
+            .keys()
+            .filter(|k| k < &slot)
+            .map(|k| stack_slots[k].size as u64)
+            .sum();
+
+        let final_offset = self.frame_offset as u64 + slot_offset + offset;
+        Address::from_parts(size, AddressRegion::Stack, 0, final_offset)
+    }
+
+    fn heap_address(&self, _size: AddressSize, _offset: u64) -> Result<Address, MemoryError> {
+        unimplemented!()
+    }
+
+    fn checked_load(&self, addr: Address, ty: Type) -> Result<DataValue, MemoryError> {
+        let load_size = ty.bytes() as usize;
+
+        let src = match addr.region {
+            AddressRegion::Stack => {
+                let addr_start = addr.offset as usize;
+                let addr_end = addr_start + load_size;
+                if addr_end > self.stack.len() {
+                    return Err(MemoryError::OutOfBoundsLoad { addr, load_size });
+                }
+
+                &self.stack[addr_start..addr_end]
+            }
+            _ => unimplemented!(),
+        };
+
+        Ok(DataValue::read_from_slice(src, ty))
+    }
+
+    fn checked_store(&mut self, addr: Address, v: DataValue) -> Result<(), MemoryError> {
+        let store_size = v.ty().bytes() as usize;
+
+        let dst = match addr.region {
+            AddressRegion::Stack => {
+                let addr_start = addr.offset as usize;
+                let addr_end = addr_start + store_size;
+                if addr_end > self.stack.len() {
+                    return Err(MemoryError::OutOfBoundsStore { addr, store_size });
+                }
+
+                &mut self.stack[addr_start..addr_end]
+            }
+            _ => unimplemented!(),
+        };
+
+        Ok(v.write_to_slice(dst))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::step::CraneliftTrap;
+    use cranelift_codegen::ir::TrapCode;
     use cranelift_reader::parse_functions;
 
     // Most interpreter tests should use the more ergonomic `test interpret` filetest but this
@@ -363,14 +375,349 @@ mod tests {
         }";
 
         let func = parse_functions(code).unwrap().into_iter().next().unwrap();
-        let mut env = Environment::default();
-        env.add(func.name.to_string(), func);
-        let interpreter = Interpreter::new(env);
-        let result = interpreter
+        let mut env = FunctionStore::default();
+        env.add(func.name.to_string(), &func);
+        let state = InterpreterState::default().with_function_store(env);
+        let result = Interpreter::new(state)
             .call_by_name("%test", &[])
             .unwrap()
             .unwrap_return();
 
         assert_eq!(result, vec![DataValue::B(true)])
+    }
+
+    // We don't have a way to check for traps with the current filetest infrastructure
+    #[test]
+    fn udiv_by_zero_traps() {
+        let code = "function %test() -> i32 {
+        block0:
+            v0 = iconst.i32 1
+            v1 = udiv_imm.i32 v0, 0
+            return v1
+        }";
+
+        let func = parse_functions(code).unwrap().into_iter().next().unwrap();
+        let mut env = FunctionStore::default();
+        env.add(func.name.to_string(), &func);
+        let state = InterpreterState::default().with_function_store(env);
+        let trap = Interpreter::new(state)
+            .call_by_name("%test", &[])
+            .unwrap()
+            .unwrap_trap();
+
+        assert_eq!(trap, CraneliftTrap::User(TrapCode::IntegerDivisionByZero));
+    }
+
+    #[test]
+    fn sdiv_min_by_neg_one_traps_with_overflow() {
+        let code = "function %test() -> i8 {
+        block0:
+            v0 = iconst.i32 -2147483648
+            v1 = sdiv_imm.i32 v0, -1
+            return v1
+        }";
+
+        let func = parse_functions(code).unwrap().into_iter().next().unwrap();
+        let mut env = FunctionStore::default();
+        env.add(func.name.to_string(), &func);
+        let state = InterpreterState::default().with_function_store(env);
+        let result = Interpreter::new(state).call_by_name("%test", &[]).unwrap();
+
+        match result {
+            ControlFlow::Trap(CraneliftTrap::User(TrapCode::IntegerOverflow)) => {}
+            _ => panic!("Unexpected ControlFlow: {:?}", result),
+        }
+    }
+
+    // This test verifies that functions can refer to each other using the function store. A double indirection is
+    // required, which is tricky to get right: a referenced function is a FuncRef when called but a FuncIndex inside the
+    // function store. This test would preferably be a CLIF filetest but the filetest infrastructure only looks at a
+    // single function at a time--we need more than one function in the store for this test.
+    #[test]
+    fn function_references() {
+        let code = "
+        function %child(i32) -> i32 {
+        block0(v0: i32):
+            v1 = iadd_imm v0, -1
+            return v1
+        }
+
+        function %parent(i32) -> i32 {
+            fn42 = %child(i32) -> i32
+        block0(v0: i32):
+            v1 = iadd_imm v0, 1
+            v2 = call fn42(v1)
+            return v2
+        }";
+
+        let mut env = FunctionStore::default();
+        let funcs = parse_functions(code).unwrap().to_vec();
+        funcs.iter().for_each(|f| env.add(f.name.to_string(), f));
+
+        let state = InterpreterState::default().with_function_store(env);
+        let result = Interpreter::new(state)
+            .call_by_name("%parent", &[DataValue::I32(0)])
+            .unwrap()
+            .unwrap_return();
+
+        assert_eq!(result, vec![DataValue::I32(0)])
+    }
+
+    #[test]
+    fn state_flags() {
+        let mut state = InterpreterState::default();
+        let flag = IntCC::Overflow;
+        assert!(!state.has_iflag(flag));
+        state.set_iflag(flag);
+        assert!(state.has_iflag(flag));
+        state.clear_flags();
+        assert!(!state.has_iflag(flag));
+    }
+
+    #[test]
+    fn fuel() {
+        let code = "function %test() -> b1 {
+        block0:
+            v0 = iconst.i32 1
+            v1 = iadd_imm v0, 1
+            return v1
+        }";
+
+        let func = parse_functions(code).unwrap().into_iter().next().unwrap();
+        let mut env = FunctionStore::default();
+        env.add(func.name.to_string(), &func);
+
+        // The default interpreter should not enable the fuel mechanism
+        let state = InterpreterState::default().with_function_store(env.clone());
+        let result = Interpreter::new(state)
+            .call_by_name("%test", &[])
+            .unwrap()
+            .unwrap_return();
+        assert_eq!(result, vec![DataValue::I32(2)]);
+
+        // With 2 fuel, we should execute the iconst and iadd, but not the return thus giving a
+        // fuel exhausted error
+        let state = InterpreterState::default().with_function_store(env.clone());
+        let result = Interpreter::new(state)
+            .with_fuel(Some(2))
+            .call_by_name("%test", &[]);
+        match result {
+            Err(InterpreterError::FuelExhausted) => {}
+            _ => panic!("Expected Err(FuelExhausted), but got {:?}", result),
+        }
+
+        // With 3 fuel, we should be able to execute the return instruction, and complete the test
+        let state = InterpreterState::default().with_function_store(env.clone());
+        let result = Interpreter::new(state)
+            .with_fuel(Some(3))
+            .call_by_name("%test", &[])
+            .unwrap()
+            .unwrap_return();
+        assert_eq!(result, vec![DataValue::I32(2)]);
+    }
+
+    // Verifies that writing to the stack on a called function does not overwrite the parents
+    // stack slots.
+    #[test]
+    fn stack_slots_multi_functions() {
+        let code = "
+        function %callee(i64, i64) -> i64 {
+            ss0 = explicit_slot 8
+            ss1 = explicit_slot 8
+
+        block0(v0: i64, v1: i64):
+            stack_store.i64 v0, ss0
+            stack_store.i64 v1, ss1
+            v2 = stack_load.i64 ss0
+            v3 = stack_load.i64 ss1
+            v4 = iadd.i64 v2, v3
+            return v4
+        }
+
+        function %caller(i64, i64, i64, i64) -> i64 {
+            fn0 = %callee(i64, i64) -> i64
+            ss0 = explicit_slot 8
+            ss1 = explicit_slot 8
+
+        block0(v0: i64, v1: i64, v2: i64, v3: i64):
+            stack_store.i64 v0, ss0
+            stack_store.i64 v1, ss1
+
+            v4 = call fn0(v2, v3)
+
+            v5 = stack_load.i64 ss0
+            v6 = stack_load.i64 ss1
+
+            v7 = iadd.i64 v4, v5
+            v8 = iadd.i64 v7, v6
+
+            return v8
+        }";
+
+        let mut env = FunctionStore::default();
+        let funcs = parse_functions(code).unwrap().to_vec();
+        funcs.iter().for_each(|f| env.add(f.name.to_string(), f));
+
+        let state = InterpreterState::default().with_function_store(env);
+        let result = Interpreter::new(state)
+            .call_by_name(
+                "%caller",
+                &[
+                    DataValue::I64(3),
+                    DataValue::I64(5),
+                    DataValue::I64(7),
+                    DataValue::I64(11),
+                ],
+            )
+            .unwrap()
+            .unwrap_return();
+
+        assert_eq!(result, vec![DataValue::I64(26)])
+    }
+
+    #[test]
+    fn out_of_slot_write_traps() {
+        let code = "
+        function %stack_write() {
+            ss0 = explicit_slot 8
+
+        block0:
+            v0 = iconst.i64 10
+            stack_store.i64 v0, ss0+8
+            return
+        }";
+
+        let func = parse_functions(code).unwrap().into_iter().next().unwrap();
+        let mut env = FunctionStore::default();
+        env.add(func.name.to_string(), &func);
+        let state = InterpreterState::default().with_function_store(env);
+        let trap = Interpreter::new(state)
+            .call_by_name("%stack_write", &[])
+            .unwrap()
+            .unwrap_trap();
+
+        assert_eq!(trap, CraneliftTrap::User(TrapCode::HeapOutOfBounds));
+    }
+
+    #[test]
+    fn partial_out_of_slot_write_traps() {
+        let code = "
+        function %stack_write() {
+            ss0 = explicit_slot 8
+
+        block0:
+            v0 = iconst.i64 10
+            stack_store.i64 v0, ss0+4
+            return
+        }";
+
+        let func = parse_functions(code).unwrap().into_iter().next().unwrap();
+        let mut env = FunctionStore::default();
+        env.add(func.name.to_string(), &func);
+        let state = InterpreterState::default().with_function_store(env);
+        let trap = Interpreter::new(state)
+            .call_by_name("%stack_write", &[])
+            .unwrap()
+            .unwrap_trap();
+
+        assert_eq!(trap, CraneliftTrap::User(TrapCode::HeapOutOfBounds));
+    }
+
+    #[test]
+    fn out_of_slot_read_traps() {
+        let code = "
+        function %stack_load() {
+            ss0 = explicit_slot 8
+
+        block0:
+            v0 = stack_load.i64 ss0+8
+            return
+        }";
+
+        let func = parse_functions(code).unwrap().into_iter().next().unwrap();
+        let mut env = FunctionStore::default();
+        env.add(func.name.to_string(), &func);
+        let state = InterpreterState::default().with_function_store(env);
+        let trap = Interpreter::new(state)
+            .call_by_name("%stack_load", &[])
+            .unwrap()
+            .unwrap_trap();
+
+        assert_eq!(trap, CraneliftTrap::User(TrapCode::HeapOutOfBounds));
+    }
+
+    #[test]
+    fn partial_out_of_slot_read_traps() {
+        let code = "
+        function %stack_load() {
+            ss0 = explicit_slot 8
+
+        block0:
+            v0 = stack_load.i64 ss0+4
+            return
+        }";
+
+        let func = parse_functions(code).unwrap().into_iter().next().unwrap();
+        let mut env = FunctionStore::default();
+        env.add(func.name.to_string(), &func);
+        let state = InterpreterState::default().with_function_store(env);
+        let trap = Interpreter::new(state)
+            .call_by_name("%stack_load", &[])
+            .unwrap()
+            .unwrap_trap();
+
+        assert_eq!(trap, CraneliftTrap::User(TrapCode::HeapOutOfBounds));
+    }
+
+    #[test]
+    fn partial_out_of_slot_read_by_addr_traps() {
+        let code = "
+        function %stack_load() {
+            ss0 = explicit_slot 8
+
+        block0:
+            v0 = stack_addr.i64 ss0
+            v1 = iconst.i64 4
+            v2 = iadd.i64 v0, v1
+            v3 = load.i64 v2
+            return
+        }";
+
+        let func = parse_functions(code).unwrap().into_iter().next().unwrap();
+        let mut env = FunctionStore::default();
+        env.add(func.name.to_string(), &func);
+        let state = InterpreterState::default().with_function_store(env);
+        let trap = Interpreter::new(state)
+            .call_by_name("%stack_load", &[])
+            .unwrap()
+            .unwrap_trap();
+
+        assert_eq!(trap, CraneliftTrap::User(TrapCode::HeapOutOfBounds));
+    }
+
+    #[test]
+    fn partial_out_of_slot_write_by_addr_traps() {
+        let code = "
+        function %stack_store() {
+            ss0 = explicit_slot 8
+
+        block0:
+            v0 = stack_addr.i64 ss0
+            v1 = iconst.i64 4
+            v2 = iadd.i64 v0, v1
+            store.i64 v1, v2
+            return
+        }";
+
+        let func = parse_functions(code).unwrap().into_iter().next().unwrap();
+        let mut env = FunctionStore::default();
+        env.add(func.name.to_string(), &func);
+        let state = InterpreterState::default().with_function_store(env);
+        let trap = Interpreter::new(state)
+            .call_by_name("%stack_store", &[])
+            .unwrap()
+            .unwrap_trap();
+
+        assert_eq!(trap, CraneliftTrap::User(TrapCode::HeapOutOfBounds));
     }
 }

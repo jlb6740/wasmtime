@@ -1,12 +1,12 @@
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use wasmtime::*;
 
-fn interruptable_store() -> Store {
-    let engine = Engine::new(Config::new().interruptable(true));
-    Store::new(&engine)
+fn interruptable_store() -> Store<()> {
+    let engine = Engine::new(Config::new().interruptable(true)).unwrap();
+    Store::new(&engine, ())
 }
 
-fn hugely_recursive_module(store: &Store) -> anyhow::Result<Module> {
+fn hugely_recursive_module(engine: &Engine) -> anyhow::Result<Module> {
     let mut wat = String::new();
     wat.push_str(
         r#"
@@ -19,30 +19,30 @@ fn hugely_recursive_module(store: &Store) -> anyhow::Result<Module> {
     }
     wat.push_str("(func call 0)\n");
 
-    Module::new(store.engine(), &wat)
+    Module::new(engine, &wat)
 }
 
 #[test]
 fn loops_interruptable() -> anyhow::Result<()> {
-    let store = interruptable_store();
+    let mut store = interruptable_store();
     let module = Module::new(store.engine(), r#"(func (export "loop") (loop br 0))"#)?;
-    let instance = Instance::new(&store, &module, &[])?;
-    let iloop = instance.get_func("loop").unwrap().get0::<()>()?;
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let iloop = instance.get_typed_func::<(), (), _>(&mut store, "loop")?;
     store.interrupt_handle()?.interrupt();
-    let trap = iloop().unwrap_err();
+    let trap = iloop.call(&mut store, ()).unwrap_err();
     assert!(trap.to_string().contains("wasm trap: interrupt"));
     Ok(())
 }
 
 #[test]
 fn functions_interruptable() -> anyhow::Result<()> {
-    let store = interruptable_store();
-    let module = hugely_recursive_module(&store)?;
-    let func = Func::wrap(&store, || {});
-    let instance = Instance::new(&store, &module, &[func.into()])?;
-    let iloop = instance.get_func("loop").unwrap().get0::<()>()?;
+    let mut store = interruptable_store();
+    let module = hugely_recursive_module(store.engine())?;
+    let func = Func::wrap(&mut store, || {});
+    let instance = Instance::new(&mut store, &module, &[func.into()])?;
+    let iloop = instance.get_typed_func::<(), (), _>(&mut store, "loop")?;
     store.interrupt_handle()?.interrupt();
-    let trap = iloop().unwrap_err();
+    let trap = iloop.call(&mut store, ()).unwrap_err();
     assert!(
         trap.to_string().contains("wasm trap: interrupt"),
         "{}",
@@ -57,7 +57,7 @@ fn loop_interrupt_from_afar() -> anyhow::Result<()> {
     // the loop so we can count the number of loop iterations we've executed so
     // far.
     static HITS: AtomicUsize = AtomicUsize::new(0);
-    let store = interruptable_store();
+    let mut store = interruptable_store();
     let module = Module::new(
         store.engine(),
         r#"
@@ -70,10 +70,10 @@ fn loop_interrupt_from_afar() -> anyhow::Result<()> {
             )
         "#,
     )?;
-    let func = Func::wrap(&store, || {
+    let func = Func::wrap(&mut store, || {
         HITS.fetch_add(1, SeqCst);
     });
-    let instance = Instance::new(&store, &module, &[func.into()])?;
+    let instance = Instance::new(&mut store, &module, &[func.into()])?;
 
     // Use the instance's interrupt handle to wait for it to enter the loop long
     // enough and then we signal an interrupt happens.
@@ -82,13 +82,14 @@ fn loop_interrupt_from_afar() -> anyhow::Result<()> {
         while HITS.load(SeqCst) <= 100_000 {
             // continue ...
         }
+        println!("interrupting");
         handle.interrupt();
     });
 
     // Enter the infinitely looping function and assert that our interrupt
     // handle does indeed actually interrupt the function.
-    let iloop = instance.get_func("loop").unwrap().get0::<()>()?;
-    let trap = iloop().unwrap_err();
+    let iloop = instance.get_typed_func::<(), (), _>(&mut store, "loop")?;
+    let trap = iloop.call(&mut store, ()).unwrap_err();
     thread.join().unwrap();
     assert!(
         trap.to_string().contains("wasm trap: interrupt"),
@@ -104,12 +105,12 @@ fn function_interrupt_from_afar() -> anyhow::Result<()> {
     // the loop so we can count the number of loop iterations we've executed so
     // far.
     static HITS: AtomicUsize = AtomicUsize::new(0);
-    let store = interruptable_store();
-    let module = hugely_recursive_module(&store)?;
-    let func = Func::wrap(&store, || {
+    let mut store = interruptable_store();
+    let module = hugely_recursive_module(store.engine())?;
+    let func = Func::wrap(&mut store, || {
         HITS.fetch_add(1, SeqCst);
     });
-    let instance = Instance::new(&store, &module, &[func.into()])?;
+    let instance = Instance::new(&mut store, &module, &[func.into()])?;
 
     // Use the instance's interrupt handle to wait for it to enter the loop long
     // enough and then we signal an interrupt happens.
@@ -123,8 +124,8 @@ fn function_interrupt_from_afar() -> anyhow::Result<()> {
 
     // Enter the infinitely looping function and assert that our interrupt
     // handle does indeed actually interrupt the function.
-    let iloop = instance.get_func("loop").unwrap().get0::<()>()?;
-    let trap = iloop().unwrap_err();
+    let iloop = instance.get_typed_func::<(), (), _>(&mut store, "loop")?;
+    let trap = iloop.call(&mut store, ()).unwrap_err();
     thread.join().unwrap();
     assert!(
         trap.to_string().contains("wasm trap: interrupt"),

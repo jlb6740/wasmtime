@@ -1,7 +1,7 @@
 //! CLI tool to reduce Cranelift IR files crashing during compilation.
 
-use crate::disasm::{PrintRelocs, PrintStackmaps, PrintTraps};
 use crate::utils::{parse_sets_and_triple, read_to_string};
+use anyhow::{Context as _, Result};
 use cranelift_codegen::cursor::{Cursor, FuncCursor};
 use cranelift_codegen::flowgraph::ControlFlowGraph;
 use cranelift_codegen::ir::types::{F32, F64};
@@ -13,25 +13,37 @@ use cranelift_codegen::isa::TargetIsa;
 use cranelift_codegen::Context;
 use cranelift_entity::PrimaryMap;
 use cranelift_reader::{parse_test, ParseOptions};
-use std::collections::HashMap;
-use std::path::Path;
-
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use structopt::StructOpt;
 
-pub fn run(
-    filename: &str,
-    flag_set: &[String],
-    flag_isa: &str,
+/// Reduce size of clif file causing panic during compilation.
+#[derive(StructOpt)]
+pub struct Options {
+    /// Specify an input file to be used. Use '-' for stdin.
+    #[structopt(parse(from_os_str))]
+    file: PathBuf,
+
+    /// Configure Cranelift settings
+    #[structopt(long("set"))]
+    settings: Vec<String>,
+
+    /// Specify the target architecture.
+    target: String,
+
+    /// Be more verbose
+    #[structopt(short = "v", long = "verbose")]
     verbose: bool,
-) -> Result<(), String> {
-    let parsed = parse_sets_and_triple(flag_set, flag_isa)?;
+}
+
+pub fn run(options: &Options) -> Result<()> {
+    let parsed = parse_sets_and_triple(&options.settings, &options.target)?;
     let fisa = parsed.as_fisa();
 
-    let path = Path::new(&filename).to_path_buf();
-
-    let buffer = read_to_string(&path).map_err(|e| format!("{}: {}", filename, e))?;
-    let test_file =
-        parse_test(&buffer, ParseOptions::default()).map_err(|e| format!("{}: {}", filename, e))?;
+    let buffer = read_to_string(&options.file)?;
+    let test_file = parse_test(&buffer, ParseOptions::default())
+        .with_context(|| format!("failed to parse {}", options.file.display()))?;
 
     // If we have an isa from the command-line, use that. Otherwise if the
     // file contains a unique isa, use that.
@@ -40,7 +52,7 @@ pub fn run(
     } else if let Some(isa) = test_file.isa_spec.unique_isa() {
         isa
     } else {
-        return Err(String::from("compilation requires a target isa"));
+        anyhow::bail!("compilation requires a target isa");
     };
 
     std::env::set_var("RUST_BACKTRACE", "0"); // Disable backtraces to reduce verbosity
@@ -48,7 +60,7 @@ pub fn run(
     for (func, _) in test_file.functions {
         let (orig_block_count, orig_inst_count) = (block_count(&func), inst_count(&func));
 
-        match reduce(isa, func, verbose) {
+        match reduce(isa, func, options.verbose) {
             Ok((func, crash_msg)) => {
                 println!("Crash message: {}", crash_msg);
                 println!("\n{}", func);
@@ -557,18 +569,6 @@ impl Mutator for RemoveUnusedEntities {
                                     .push(inst);
                             }
 
-                            InstructionData::RegSpill { dst, .. } => {
-                                stack_slot_usage_map
-                                    .entry(dst)
-                                    .or_insert_with(Vec::new)
-                                    .push(inst);
-                            }
-                            InstructionData::RegFill { src, .. } => {
-                                stack_slot_usage_map
-                                    .entry(src)
-                                    .or_insert_with(Vec::new)
-                                    .push(inst);
-                            }
                             _ => {}
                         }
                     }
@@ -585,12 +585,6 @@ impl Mutator for RemoveUnusedEntities {
                                 InstructionData::StackLoad { stack_slot, .. }
                                 | InstructionData::StackStore { stack_slot, .. } => {
                                     *stack_slot = new_stack_slot;
-                                }
-                                InstructionData::RegSpill { dst, .. } => {
-                                    *dst = new_stack_slot;
-                                }
-                                InstructionData::RegFill { src, .. } => {
-                                    *src = new_stack_slot;
                                 }
                                 _ => unreachable!(),
                             }
@@ -833,20 +827,11 @@ fn try_resolve_aliases(context: &mut CrashCheckContext, func: &mut Function) {
     }
 }
 
-fn reduce(
-    isa: &dyn TargetIsa,
-    mut func: Function,
-    verbose: bool,
-) -> Result<(Function, String), String> {
+fn reduce(isa: &dyn TargetIsa, mut func: Function, verbose: bool) -> Result<(Function, String)> {
     let mut context = CrashCheckContext::new(isa);
 
-    match context.check_for_crash(&func) {
-        CheckResult::Succeed => {
-            return Err(
-                "Given function compiled successfully or gave a verifier error.".to_string(),
-            );
-        }
-        CheckResult::Crash(_) => {}
+    if let CheckResult::Succeed = context.check_for_crash(&func) {
+        anyhow::bail!("Given function compiled successfully or gave a verifier error.");
     }
 
     try_resolve_aliases(&mut context, &mut func);
@@ -1043,17 +1028,9 @@ impl<'a> CrashCheckContext<'a> {
         std::panic::set_hook(Box::new(|_| {})); // silence panics
 
         let res = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut relocs = PrintRelocs::new(false);
-            let mut traps = PrintTraps::new(false);
-            let mut stackmaps = PrintStackmaps::new(false);
-
-            let _ = self.context.compile_and_emit(
-                self.isa,
-                &mut self.code_memory,
-                &mut relocs,
-                &mut traps,
-                &mut stackmaps,
-            );
+            let _ = self
+                .context
+                .compile_and_emit(self.isa, &mut self.code_memory);
         })) {
             Ok(()) => CheckResult::Succeed,
             Err(err) => CheckResult::Crash(get_panic_string(err)),

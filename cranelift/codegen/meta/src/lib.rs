@@ -1,5 +1,7 @@
 //! This crate generates Rust sources for use by
 //! [`cranelift_codegen`](../cranelift_codegen/index.html).
+
+use std::path::Path;
 #[macro_use]
 mod cdsl;
 mod srcgen;
@@ -7,15 +9,11 @@ mod srcgen;
 pub mod error;
 pub mod isa;
 
-mod gen_binemit;
-mod gen_encodings;
 mod gen_inst;
-mod gen_legalizer;
-mod gen_registers;
 mod gen_settings;
 mod gen_types;
 
-mod default_map;
+mod constant_hash;
 mod shared;
 mod unique_table;
 
@@ -25,7 +23,7 @@ pub fn isa_from_arch(arch: &str) -> Result<isa::Isa, String> {
 }
 
 /// Generates all the Rust source files used in Cranelift from the meta-language.
-pub fn generate(isas: &[isa::Isa], out_dir: &str) -> Result<(), error::Error> {
+pub fn generate(isas: &[isa::Isa], out_dir: &str, crate_dir: &Path) -> Result<(), error::Error> {
     // Create all the definitions:
     // - common definitions.
     let mut shared_defs = shared::define();
@@ -39,7 +37,7 @@ pub fn generate(isas: &[isa::Isa], out_dir: &str) -> Result<(), error::Error> {
     gen_types::generate("types.rs", &out_dir)?;
 
     // - per ISA definitions.
-    let isas = isa::define(isas, &mut shared_defs);
+    let target_isas = isa::define(isas, &mut shared_defs);
 
     // At this point, all definitions are done.
     let all_formats = shared_defs.verify_instruction_formats();
@@ -50,32 +48,16 @@ pub fn generate(isas: &[isa::Isa], out_dir: &str) -> Result<(), error::Error> {
         &shared_defs.all_instructions,
         "opcodes.rs",
         "inst_builder.rs",
+        "clif.isle",
         &out_dir,
+        crate_dir,
     )?;
 
-    gen_legalizer::generate(&isas, &shared_defs.transform_groups, "legalize", &out_dir)?;
-
-    for isa in isas {
-        gen_registers::generate(&isa, &format!("registers-{}.rs", isa.name), &out_dir)?;
-
+    for isa in target_isas {
         gen_settings::generate(
             &isa.settings,
             gen_settings::ParentGroup::Shared,
             &format!("settings-{}.rs", isa.name),
-            &out_dir,
-        )?;
-
-        gen_encodings::generate(
-            &shared_defs,
-            &isa,
-            &format!("encoding-{}.rs", isa.name),
-            &out_dir,
-        )?;
-
-        gen_binemit::generate(
-            &isa.name,
-            &isa.recipes,
-            &format!("binemit-{}.rs", isa.name),
             &out_dir,
         )?;
     }

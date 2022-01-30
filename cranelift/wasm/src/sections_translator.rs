@@ -7,55 +7,120 @@
 //! The special case of the initialize expressions for table elements offsets or global variables
 //! is handled, according to the semantics of WebAssembly, to only specific expressions that are
 //! interpreted on the fly.
-use crate::environ::{ModuleEnvironment, WasmError, WasmResult};
+use crate::environ::{Alias, ModuleEnvironment};
 use crate::state::ModuleTranslationState;
-use crate::translation_utils::{
-    tabletype_to_type, type_to_type, DataIndex, ElemIndex, FuncIndex, Global, GlobalIndex,
-    GlobalInit, Memory, MemoryIndex, SignatureIndex, Table, TableElementType, TableIndex,
+use crate::wasm_unsupported;
+use crate::{
+    DataIndex, ElemIndex, EntityIndex, EntityType, FuncIndex, Global, GlobalIndex, GlobalInit,
+    InstanceIndex, Memory, MemoryIndex, ModuleIndex, Table, TableIndex, Tag, TagIndex, TypeIndex,
+    WasmError, WasmResult,
 };
-use crate::{wasm_unsupported, HashMap};
 use core::convert::TryFrom;
-use cranelift_codegen::ir::immediates::V128Imm;
-use cranelift_codegen::ir::{self, AbiParam, Signature};
+use core::convert::TryInto;
 use cranelift_entity::packed_option::ReservedValue;
 use cranelift_entity::EntityRef;
 use std::boxed::Box;
 use std::vec::Vec;
 use wasmparser::{
-    self, CodeSectionReader, Data, DataKind, DataSectionReader, Element, ElementItem, ElementItems,
-    ElementKind, ElementSectionReader, Export, ExportSectionReader, ExternalKind,
-    FunctionSectionReader, GlobalSectionReader, GlobalType, ImportSectionEntryType,
-    ImportSectionReader, MemorySectionReader, MemoryType, NameSectionReader, Naming, NamingReader,
-    Operator, TableSectionReader, Type, TypeSectionReader,
+    self, Data, DataKind, DataSectionReader, Element, ElementItem, ElementItems, ElementKind,
+    ElementSectionReader, Export, ExportSectionReader, ExternalKind, FunctionSectionReader,
+    GlobalSectionReader, GlobalType, ImportSectionEntryType, ImportSectionReader,
+    MemorySectionReader, MemoryType, NameSectionReader, Naming, Operator, TableSectionReader,
+    TableType, TagSectionReader, TagType, TypeDef, TypeSectionReader,
 };
 
+fn entity_type(
+    ty: ImportSectionEntryType,
+    environ: &mut dyn ModuleEnvironment<'_>,
+) -> WasmResult<EntityType> {
+    Ok(match ty {
+        ImportSectionEntryType::Function(sig) => {
+            EntityType::Function(environ.type_to_signature(TypeIndex::from_u32(sig))?)
+        }
+        ImportSectionEntryType::Module(sig) => {
+            EntityType::Module(environ.type_to_module_type(TypeIndex::from_u32(sig))?)
+        }
+        ImportSectionEntryType::Instance(sig) => {
+            EntityType::Instance(environ.type_to_instance_type(TypeIndex::from_u32(sig))?)
+        }
+        ImportSectionEntryType::Memory(ty) => EntityType::Memory(memory(ty)),
+        ImportSectionEntryType::Tag(t) => EntityType::Tag(tag(t)),
+        ImportSectionEntryType::Global(ty) => EntityType::Global(global(ty, GlobalInit::Import)?),
+        ImportSectionEntryType::Table(ty) => EntityType::Table(table(ty)?),
+    })
+}
+
+fn memory(ty: MemoryType) -> Memory {
+    Memory {
+        minimum: ty.initial,
+        maximum: ty.maximum,
+        shared: ty.shared,
+        memory64: ty.memory64,
+    }
+}
+
+fn tag(e: TagType) -> Tag {
+    Tag {
+        ty: TypeIndex::from_u32(e.type_index),
+    }
+}
+
+fn table(ty: TableType) -> WasmResult<Table> {
+    Ok(Table {
+        wasm_ty: ty.element_type.try_into()?,
+        minimum: ty.initial,
+        maximum: ty.maximum,
+    })
+}
+
+fn global(ty: GlobalType, initializer: GlobalInit) -> WasmResult<Global> {
+    Ok(Global {
+        wasm_ty: ty.content_type.try_into()?,
+        mutability: ty.mutable,
+        initializer,
+    })
+}
+
 /// Parses the Type section of the wasm module.
-pub fn parse_type_section(
-    types: TypeSectionReader,
+pub fn parse_type_section<'a>(
+    types: TypeSectionReader<'a>,
     module_translation_state: &mut ModuleTranslationState,
-    environ: &mut dyn ModuleEnvironment,
+    environ: &mut dyn ModuleEnvironment<'a>,
 ) -> WasmResult<()> {
     let count = types.get_count();
     module_translation_state.wasm_types.reserve(count as usize);
-    environ.reserve_signatures(count)?;
+    environ.reserve_types(count)?;
 
     for entry in types {
-        let wasm_func_ty = entry?;
-        let mut sig = Signature::new(ModuleEnvironment::target_config(environ).default_call_conv);
-        sig.params.extend(wasm_func_ty.params.iter().map(|ty| {
-            let cret_arg: ir::Type = type_to_type(*ty, environ)
-                .expect("only numeric types are supported in function signatures");
-            AbiParam::new(cret_arg)
-        }));
-        sig.returns.extend(wasm_func_ty.returns.iter().map(|ty| {
-            let cret_arg: ir::Type = type_to_type(*ty, environ)
-                .expect("only numeric types are supported in function signatures");
-            AbiParam::new(cret_arg)
-        }));
-        environ.declare_signature(&wasm_func_ty, sig)?;
-        module_translation_state
-            .wasm_types
-            .push((wasm_func_ty.params, wasm_func_ty.returns));
+        match entry? {
+            TypeDef::Func(wasm_func_ty) => {
+                environ.declare_type_func(wasm_func_ty.clone().try_into()?)?;
+                module_translation_state
+                    .wasm_types
+                    .push((wasm_func_ty.params, wasm_func_ty.returns));
+            }
+            TypeDef::Module(t) => {
+                let imports = t
+                    .imports
+                    .iter()
+                    .map(|i| Ok((i.module, i.field, entity_type(i.ty, environ)?)))
+                    .collect::<WasmResult<Vec<_>>>()?;
+                let exports = t
+                    .exports
+                    .iter()
+                    .map(|e| Ok((e.name, entity_type(e.ty, environ)?)))
+                    .collect::<WasmResult<Vec<_>>>()?;
+                environ.declare_type_module(&imports, &exports)?;
+            }
+            TypeDef::Instance(t) => {
+                let exports = t
+                    .exports
+                    .iter()
+                    .map(|e| Ok((e.name, entity_type(e.ty, environ)?)))
+                    .collect::<WasmResult<Vec<_>>>()?;
+                environ.declare_type_instance(&exports)?;
+            }
+        }
     }
     Ok(())
 }
@@ -69,57 +134,41 @@ pub fn parse_import_section<'data>(
 
     for entry in imports {
         let import = entry?;
-        let module_name = import.module;
-        let field_name = import.field;
-
         match import.ty {
             ImportSectionEntryType::Function(sig) => {
                 environ.declare_func_import(
-                    SignatureIndex::from_u32(sig),
-                    module_name,
-                    field_name,
+                    TypeIndex::from_u32(sig),
+                    import.module,
+                    import.field,
                 )?;
             }
-            ImportSectionEntryType::Memory(MemoryType {
-                limits: ref memlimits,
-                shared,
-            }) => {
-                environ.declare_memory_import(
-                    Memory {
-                        minimum: memlimits.initial,
-                        maximum: memlimits.maximum,
-                        shared,
-                    },
-                    module_name,
-                    field_name,
+            ImportSectionEntryType::Module(sig) => {
+                environ.declare_module_import(
+                    TypeIndex::from_u32(sig),
+                    import.module,
+                    import.field,
                 )?;
             }
-            ImportSectionEntryType::Global(ref ty) => {
-                environ.declare_global_import(
-                    Global {
-                        wasm_ty: ty.content_type,
-                        ty: type_to_type(ty.content_type, environ).unwrap(),
-                        mutability: ty.mutable,
-                        initializer: GlobalInit::Import,
-                    },
-                    module_name,
-                    field_name,
+            ImportSectionEntryType::Instance(sig) => {
+                environ.declare_instance_import(
+                    TypeIndex::from_u32(sig),
+                    import.module,
+                    import.field,
                 )?;
             }
-            ImportSectionEntryType::Table(ref tab) => {
-                environ.declare_table_import(
-                    Table {
-                        wasm_ty: tab.element_type,
-                        ty: match tabletype_to_type(tab.element_type, environ)? {
-                            Some(t) => TableElementType::Val(t),
-                            None => TableElementType::Func,
-                        },
-                        minimum: tab.limits.initial,
-                        maximum: tab.limits.maximum,
-                    },
-                    module_name,
-                    field_name,
-                )?;
+            ImportSectionEntryType::Memory(ty) => {
+                environ.declare_memory_import(memory(ty), import.module, import.field)?;
+            }
+            ImportSectionEntryType::Tag(e) => {
+                environ.declare_tag_import(tag(e), import.module, import.field)?;
+            }
+            ImportSectionEntryType::Global(ty) => {
+                let ty = global(ty, GlobalInit::Import)?;
+                environ.declare_global_import(ty, import.module, import.field)?;
+            }
+            ImportSectionEntryType::Table(ty) => {
+                let ty = table(ty)?;
+                environ.declare_table_import(ty, import.module, import.field)?;
             }
         }
     }
@@ -143,7 +192,7 @@ pub fn parse_function_section(
 
     for entry in functions {
         let sigindex = entry?;
-        environ.declare_func_type(SignatureIndex::from_u32(sigindex))?;
+        environ.declare_func_type(TypeIndex::from_u32(sigindex))?;
     }
 
     Ok(())
@@ -157,16 +206,8 @@ pub fn parse_table_section(
     environ.reserve_tables(tables.get_count())?;
 
     for entry in tables {
-        let table = entry?;
-        environ.declare_table(Table {
-            wasm_ty: table.element_type,
-            ty: match tabletype_to_type(table.element_type, environ)? {
-                Some(t) => TableElementType::Val(t),
-                None => TableElementType::Func,
-            },
-            minimum: table.limits.initial,
-            maximum: table.limits.maximum,
-        })?;
+        let ty = table(entry?)?;
+        environ.declare_table(ty)?;
     }
 
     Ok(())
@@ -180,12 +221,23 @@ pub fn parse_memory_section(
     environ.reserve_memories(memories.get_count())?;
 
     for entry in memories {
-        let memory = entry?;
-        environ.declare_memory(Memory {
-            minimum: memory.limits.initial,
-            maximum: memory.limits.maximum,
-            shared: memory.shared,
-        })?;
+        let memory = memory(entry?);
+        environ.declare_memory(memory)?;
+    }
+
+    Ok(())
+}
+
+/// Parses the Tag section of the wasm module.
+pub fn parse_tag_section(
+    tags: TagSectionReader,
+    environ: &mut dyn ModuleEnvironment,
+) -> WasmResult<()> {
+    environ.reserve_tags(tags.get_count())?;
+
+    for entry in tags {
+        let tag = tag(entry?);
+        environ.declare_tag(tag)?;
     }
 
     Ok(())
@@ -199,13 +251,7 @@ pub fn parse_global_section(
     environ.reserve_globals(globals.get_count())?;
 
     for entry in globals {
-        let wasmparser::Global {
-            ty: GlobalType {
-                content_type,
-                mutable,
-            },
-            init_expr,
-        } = entry?;
+        let wasmparser::Global { ty, init_expr } = entry?;
         let mut init_expr_reader = init_expr.get_binary_reader();
         let initializer = match init_expr_reader.read_operator()? {
             Operator::I32Const { value } => GlobalInit::I32Const(value),
@@ -213,7 +259,7 @@ pub fn parse_global_section(
             Operator::F32Const { value } => GlobalInit::F32Const(value.bits()),
             Operator::F64Const { value } => GlobalInit::F64Const(value.bits()),
             Operator::V128Const { value } => {
-                GlobalInit::V128Const(V128Imm::from(value.bytes().to_vec().as_slice()))
+                GlobalInit::V128Const(u128::from_le_bytes(*value.bytes()))
             }
             Operator::RefNull { ty: _ } => GlobalInit::RefNullConst,
             Operator::RefFunc { function_index } => {
@@ -229,13 +275,8 @@ pub fn parse_global_section(
                 ));
             }
         };
-        let global = Global {
-            wasm_ty: content_type,
-            ty: type_to_type(content_type, environ).unwrap(),
-            mutability: mutable,
-            initializer,
-        };
-        environ.declare_global(global)?;
+        let ty = global(ty, initializer)?;
+        environ.declare_global(ty)?;
     }
 
     Ok(())
@@ -265,9 +306,19 @@ pub fn parse_export_section<'data>(
             ExternalKind::Memory => {
                 environ.declare_memory_export(MemoryIndex::new(index), field)?
             }
+            ExternalKind::Tag => environ.declare_tag_export(TagIndex::new(index), field)?,
             ExternalKind::Global => {
                 environ.declare_global_export(GlobalIndex::new(index), field)?
             }
+            ExternalKind::Module => {
+                environ.declare_module_export(ModuleIndex::new(index), field)?
+            }
+            ExternalKind::Instance => {
+                environ.declare_instance_export(InstanceIndex::new(index), field)?
+            }
+
+            // this never gets past validation
+            ExternalKind::Type => unreachable!(),
         }
     }
 
@@ -286,7 +337,16 @@ fn read_elems(items: &ElementItems) -> WasmResult<Box<[FuncIndex]>> {
     let mut elems = Vec::with_capacity(usize::try_from(items_reader.get_count()).unwrap());
     for item in items_reader {
         let elem = match item? {
-            ElementItem::Null(_ty) => FuncIndex::reserved_value(),
+            ElementItem::Expr(init) => match init.get_binary_reader().read_operator()? {
+                Operator::RefNull { .. } => FuncIndex::reserved_value(),
+                Operator::RefFunc { function_index } => FuncIndex::from_u32(function_index),
+                s => {
+                    return Err(WasmError::Unsupported(format!(
+                        "unsupported init expr in element section: {:?}",
+                        s
+                    )));
+                }
+            },
             ElementItem::Func(index) => FuncIndex::from_u32(index),
         };
         elems.push(elem);
@@ -302,13 +362,7 @@ pub fn parse_element_section<'data>(
     environ.reserve_table_elements(elements.get_count())?;
 
     for (index, entry) in elements.into_iter().enumerate() {
-        let Element { kind, items, ty } = entry?;
-        if ty != Type::FuncRef {
-            return Err(wasm_unsupported!(
-                "unsupported table element type: {:?}",
-                ty
-            ));
-        }
+        let Element { kind, items, ty: _ } = entry?;
         let segments = read_elems(&items)?;
         match kind {
             ElementKind::Active {
@@ -317,7 +371,7 @@ pub fn parse_element_section<'data>(
             } => {
                 let mut init_expr_reader = init_expr.get_binary_reader();
                 let (base, offset) = match init_expr_reader.read_operator()? {
-                    Operator::I32Const { value } => (None, value as u32 as usize),
+                    Operator::I32Const { value } => (None, value as u32),
                     Operator::GlobalGet { global_index } => {
                         (Some(GlobalIndex::from_u32(global_index)), 0)
                     }
@@ -339,23 +393,10 @@ pub fn parse_element_section<'data>(
                 let index = ElemIndex::from_u32(index as u32);
                 environ.declare_passive_element(index, segments)?;
             }
-            ElementKind::Declared => return Err(wasm_unsupported!("element kind declared")),
+            ElementKind::Declared => {
+                environ.declare_elements(segments)?;
+            }
         }
-    }
-    Ok(())
-}
-
-/// Parses the Code section of the wasm module.
-pub fn parse_code_section<'data>(
-    code: CodeSectionReader<'data>,
-    module_translation_state: &ModuleTranslationState,
-    environ: &mut dyn ModuleEnvironment<'data>,
-) -> WasmResult<()> {
-    for body in code {
-        let mut reader = body?.get_binary_reader();
-        let size = reader.bytes_remaining();
-        let offset = reader.original_position();
-        environ.define_function_body(module_translation_state, reader.read_bytes(size)?, offset)?;
     }
     Ok(())
 }
@@ -376,7 +417,8 @@ pub fn parse_data_section<'data>(
             } => {
                 let mut init_expr_reader = init_expr.get_binary_reader();
                 let (base, offset) = match init_expr_reader.read_operator()? {
-                    Operator::I32Const { value } => (None, value as u32 as usize),
+                    Operator::I32Const { value } => (None, value as u64),
+                    Operator::I64Const { value } => (None, value as u64),
                     Operator::GlobalGet { global_index } => {
                         (Some(GlobalIndex::from_u32(global_index)), 0)
                     }
@@ -406,53 +448,124 @@ pub fn parse_data_section<'data>(
 
 /// Parses the Name section of the wasm module.
 pub fn parse_name_section<'data>(
-    mut names: NameSectionReader<'data>,
+    names: NameSectionReader<'data>,
     environ: &mut dyn ModuleEnvironment<'data>,
 ) -> WasmResult<()> {
-    while let Ok(subsection) = names.read() {
-        match subsection {
-            wasmparser::Name::Function(function_subsection) => {
-                if let Some(function_names) = function_subsection
-                    .get_map()
-                    .ok()
-                    .and_then(parse_function_name_subsection)
-                {
-                    for (index, name) in function_names {
-                        environ.declare_func_name(index, name)?;
+    for subsection in names {
+        match subsection? {
+            wasmparser::Name::Function(f) => {
+                let mut names = f.get_map()?;
+                for _ in 0..names.get_count() {
+                    let Naming { index, name } = names.read()?;
+                    // We reserve `u32::MAX` for our own use in cranelift-entity.
+                    if index != u32::max_value() {
+                        environ.declare_func_name(FuncIndex::from_u32(index), name);
                     }
                 }
             }
             wasmparser::Name::Module(module) => {
-                if let Ok(name) = module.get_name() {
-                    environ.declare_module_name(name)?;
+                let name = module.get_name()?;
+                environ.declare_module_name(name);
+            }
+            wasmparser::Name::Local(l) => {
+                let mut reader = l.get_indirect_map()?;
+                for _ in 0..reader.get_indirect_count() {
+                    let f = reader.read()?;
+                    if f.indirect_index == u32::max_value() {
+                        continue;
+                    }
+                    let mut map = f.get_map()?;
+                    for _ in 0..map.get_count() {
+                        let Naming { index, name } = map.read()?;
+                        environ.declare_local_name(
+                            FuncIndex::from_u32(f.indirect_index),
+                            index,
+                            name,
+                        )
+                    }
                 }
             }
-            wasmparser::Name::Local(_) => {}
-        };
+            wasmparser::Name::Label(_)
+            | wasmparser::Name::Type(_)
+            | wasmparser::Name::Table(_)
+            | wasmparser::Name::Global(_)
+            | wasmparser::Name::Memory(_)
+            | wasmparser::Name::Element(_)
+            | wasmparser::Name::Data(_)
+            | wasmparser::Name::Unknown { .. } => {}
+        }
     }
     Ok(())
 }
 
-fn parse_function_name_subsection(
-    mut naming_reader: NamingReader<'_>,
-) -> Option<HashMap<FuncIndex, &str>> {
-    let mut function_names = HashMap::new();
-    for _ in 0..naming_reader.get_count() {
-        let Naming { index, name } = naming_reader.read().ok()?;
-        if index == std::u32::MAX {
-            // We reserve `u32::MAX` for our own use in cranelift-entity.
-            return None;
-        }
+/// Parses the Instance section of the wasm module.
+pub fn parse_instance_section<'data>(
+    section: wasmparser::InstanceSectionReader<'data>,
+    environ: &mut dyn ModuleEnvironment<'data>,
+) -> WasmResult<()> {
+    environ.reserve_instances(section.get_count());
 
-        if function_names
-            .insert(FuncIndex::from_u32(index), name)
-            .is_some()
-        {
-            // If the function index has been previously seen, then we
-            // break out of the loop and early return `None`, because these
-            // should be unique.
-            return None;
-        }
+    for instance in section {
+        let instance = instance?;
+        let module = ModuleIndex::from_u32(instance.module());
+        let args = instance
+            .args()?
+            .into_iter()
+            .map(|arg| {
+                let arg = arg?;
+                let index = match arg.kind {
+                    ExternalKind::Function => EntityIndex::Function(FuncIndex::from_u32(arg.index)),
+                    ExternalKind::Table => EntityIndex::Table(TableIndex::from_u32(arg.index)),
+                    ExternalKind::Memory => EntityIndex::Memory(MemoryIndex::from_u32(arg.index)),
+                    ExternalKind::Global => EntityIndex::Global(GlobalIndex::from_u32(arg.index)),
+                    ExternalKind::Module => EntityIndex::Module(ModuleIndex::from_u32(arg.index)),
+                    ExternalKind::Instance => {
+                        EntityIndex::Instance(InstanceIndex::from_u32(arg.index))
+                    }
+                    ExternalKind::Tag => unimplemented!(),
+
+                    // this won't pass validation
+                    ExternalKind::Type => unreachable!(),
+                };
+                Ok((arg.name, index))
+            })
+            .collect::<WasmResult<Vec<_>>>()?;
+        environ.declare_instance(module, args)?;
     }
-    Some(function_names)
+    Ok(())
+}
+
+/// Parses the Alias section of the wasm module.
+pub fn parse_alias_section<'data>(
+    section: wasmparser::AliasSectionReader<'data>,
+    environ: &mut dyn ModuleEnvironment<'data>,
+) -> WasmResult<()> {
+    for alias in section {
+        let alias = match alias? {
+            wasmparser::Alias::OuterType {
+                relative_depth,
+                index,
+            } => Alias::OuterType {
+                relative_depth,
+                index: TypeIndex::from_u32(index),
+            },
+            wasmparser::Alias::OuterModule {
+                relative_depth,
+                index,
+            } => Alias::OuterModule {
+                relative_depth,
+                index: ModuleIndex::from_u32(index),
+            },
+            wasmparser::Alias::InstanceExport {
+                instance,
+                export,
+                kind: _,
+            } => Alias::InstanceExport {
+                instance: InstanceIndex::from_u32(instance),
+                export,
+            },
+        };
+        environ.declare_alias(alias)?;
+    }
+    Ok(())
 }

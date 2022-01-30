@@ -1,12 +1,14 @@
 //! Parser for .clif files.
 
 use crate::error::{Location, ParseError, ParseResult};
+use crate::heap_command::{HeapCommand, HeapType};
 use crate::isaspec;
 use crate::lexer::{LexError, Lexer, LocatedError, LocatedToken, Token};
-use crate::run_command::{Comparison, DataValue, Invocation, RunCommand};
+use crate::run_command::{Comparison, Invocation, RunCommand};
 use crate::sourcemap::SourceMap;
 use crate::testcommand::TestCommand;
 use crate::testfile::{Comment, Details, Feature, TestFile};
+use cranelift_codegen::data_value::DataValue;
 use cranelift_codegen::entity::EntityRef;
 use cranelift_codegen::ir;
 use cranelift_codegen::ir::entities::AnyEntity;
@@ -15,19 +17,64 @@ use cranelift_codegen::ir::instructions::{InstructionData, InstructionFormat, Va
 use cranelift_codegen::ir::types::INVALID;
 use cranelift_codegen::ir::types::*;
 use cranelift_codegen::ir::{
-    AbiParam, ArgumentExtension, ArgumentLoc, Block, Constant, ConstantData, ExtFuncData,
+    AbiParam, ArgumentExtension, ArgumentPurpose, Block, Constant, ConstantData, ExtFuncData,
     ExternalName, FuncRef, Function, GlobalValue, GlobalValueData, Heap, HeapData, HeapStyle,
     JumpTable, JumpTableData, MemFlags, Opcode, SigRef, Signature, StackSlot, StackSlotData,
-    StackSlotKind, Table, TableData, Type, Value, ValueLoc,
+    StackSlotKind, Table, TableData, Type, Value,
 };
-use cranelift_codegen::isa::{self, CallConv, Encoding, RegUnit, TargetIsa};
+use cranelift_codegen::isa::{self, CallConv};
 use cranelift_codegen::packed_option::ReservedValue;
-use cranelift_codegen::{settings, timing};
+use cranelift_codegen::{settings, settings::Configurable, timing};
 use smallvec::SmallVec;
 use std::mem;
 use std::str::FromStr;
 use std::{u16, u32};
 use target_lexicon::Triple;
+
+macro_rules! match_imm {
+    ($signed:ty, $unsigned:ty, $parser:expr, $err_msg:expr) => {{
+        if let Some(Token::Integer(text)) = $parser.token() {
+            $parser.consume();
+            let negative = text.starts_with('-');
+            let positive = text.starts_with('+');
+            let text = if negative || positive {
+                // Strip sign prefix.
+                &text[1..]
+            } else {
+                text
+            };
+
+            // Parse the text value; the lexer gives us raw text that looks like an integer.
+            let value = if text.starts_with("0x") {
+                // Skip underscores.
+                let text = text.replace("_", "");
+                // Parse it in hexadecimal form.
+                <$unsigned>::from_str_radix(&text[2..], 16).map_err(|_| {
+                    $parser.error("unable to parse value as a hexadecimal immediate")
+                })?
+            } else {
+                // Parse it as a signed type to check for overflow and other issues.
+                text.parse()
+                    .map_err(|_| $parser.error("expected decimal immediate"))?
+            };
+
+            // Apply sign if necessary.
+            let signed = if negative {
+                let value = value.wrapping_neg() as $signed;
+                if value > 0 {
+                    return Err($parser.error("negative number too small"));
+                }
+                value
+            } else {
+                value as $signed
+            };
+
+            Ok(signed)
+        } else {
+            err!($parser.loc, $err_msg)
+        }
+    }};
+}
 
 /// After some quick benchmarks a program should never have more than 100,000 blocks.
 const MAX_BLOCKS_IN_A_FUNCTION: u32 = 100_000;
@@ -49,6 +96,8 @@ pub struct ParseOptions<'a> {
     pub target: Option<&'a str>,
     /// Default calling convention used when none is specified for a parsed function.
     pub default_calling_convention: CallConv,
+    /// Default for unwind-info setting (enabled or disabled).
+    pub unwind_info: bool,
 }
 
 impl Default for ParseOptions<'_> {
@@ -57,6 +106,7 @@ impl Default for ParseOptions<'_> {
             passes: None,
             target: None,
             default_calling_convention: CallConv::Fast,
+            unwind_info: false,
         }
     }
 }
@@ -80,12 +130,12 @@ pub fn parse_test<'a>(text: &'a str, options: ParseOptions<'a>) -> ParseResult<T
         Some(pass_vec) => {
             parser.parse_test_commands();
             commands = parser.parse_cmdline_passes(pass_vec);
-            parser.parse_target_specs()?;
+            parser.parse_target_specs(&options)?;
             isa_spec = parser.parse_cmdline_target(options.target)?;
         }
         None => {
             commands = parser.parse_test_commands();
-            isa_spec = parser.parse_target_specs()?;
+            isa_spec = parser.parse_target_specs(&options)?;
         }
     };
     let features = parser.parse_cranelift_features()?;
@@ -104,7 +154,7 @@ pub fn parse_test<'a>(text: &'a str, options: ParseOptions<'a>) -> ParseResult<T
     parser.claim_gathered_comments(AnyEntity::Function);
 
     let preamble_comments = parser.take_comments();
-    let functions = parser.parse_function_list(isa_spec.unique_isa())?;
+    let functions = parser.parse_function_list()?;
 
     Ok(TestFile {
         commands,
@@ -136,6 +186,24 @@ pub fn parse_run_command<'a>(text: &str, signature: &Signature) -> ParseResult<O
     }
 }
 
+/// Parse a CLIF comment `text` as a heap command.
+///
+/// Return:
+///  - `Ok(None)` if the comment is not intended to be a `HeapCommand` (i.e. does not start with `heap`
+///  - `Ok(Some(heap))` if the comment is intended as a `HeapCommand` and can be parsed to one
+///  - `Err` otherwise.
+pub fn parse_heap_command<'a>(text: &str) -> ParseResult<Option<HeapCommand>> {
+    let _tt = timing::parse_text();
+    // We remove leading spaces and semi-colons for convenience here instead of at the call sites
+    // since this function will be attempting to parse a HeapCommand from a CLIF comment.
+    let trimmed_text = text.trim_start_matches(|c| c == ' ' || c == ';');
+    let mut parser = Parser::new(trimmed_text);
+    match parser.token() {
+        Some(Token::Identifier("heap")) => parser.parse_heap_command().map(|c| Some(c)),
+        Some(_) | None => Ok(None),
+    }
+}
+
 pub struct Parser<'a> {
     lex: Lexer<'a>,
 
@@ -161,41 +229,20 @@ pub struct Parser<'a> {
 }
 
 /// Context for resolving references when parsing a single function.
-struct Context<'a> {
+struct Context {
     function: Function,
     map: SourceMap,
 
     /// Aliases to resolve once value definitions are known.
     aliases: Vec<Value>,
-
-    /// Reference to the unique_isa for things like parsing target-specific instruction encoding
-    /// information. This is only `Some` if exactly one set of `isa` directives were found in the
-    /// prologue (it is valid to have directives for multiple different targets, but in that case
-    /// we couldn't know which target the provided encodings are intended for)
-    unique_isa: Option<&'a dyn TargetIsa>,
 }
 
-impl<'a> Context<'a> {
-    fn new(f: Function, unique_isa: Option<&'a dyn TargetIsa>) -> Self {
+impl Context {
+    fn new(f: Function) -> Self {
         Self {
             function: f,
             map: SourceMap::new(),
-            unique_isa,
             aliases: Vec::new(),
-        }
-    }
-
-    // Get the index of a recipe name if it exists.
-    fn find_recipe_index(&self, recipe_name: &str) -> Option<u16> {
-        if let Some(unique_isa) = self.unique_isa {
-            unique_isa
-                .encoding_info()
-                .names
-                .iter()
-                .position(|&name| name == recipe_name)
-                .map(|idx| idx as u16)
-        } else {
-            None
         }
     }
 
@@ -204,7 +251,7 @@ impl<'a> Context<'a> {
         self.map.def_ss(ss, loc)?;
         while self.function.stack_slots.next_key().index() <= ss.index() {
             self.function
-                .create_stack_slot(StackSlotData::new(StackSlotKind::SpillSlot, 0));
+                .create_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 0));
         }
         self.function.stack_slots[ss] = data;
         Ok(())
@@ -400,6 +447,11 @@ impl<'a> Context<'a> {
         self.function.layout.append_block(block);
         Ok(block)
     }
+
+    /// Set a block as cold.
+    fn set_cold_block(&mut self, block: Block) {
+        self.function.layout.set_cold(block);
+    }
 }
 
 impl<'a> Parser<'a> {
@@ -445,7 +497,7 @@ impl<'a> Parser<'a> {
         // running. I don't think this is true - self.lookahead is mutated in the loop body - so
         // maybe this is a clippy bug? Either way, disable clippy for this.
         #[cfg_attr(feature = "cargo-clippy", allow(clippy::while_immutable_condition))]
-        while self.lookahead == None {
+        while self.lookahead.is_none() {
             match self.lex.next() {
                 Some(Ok(LocatedToken { token, location })) => {
                     match token {
@@ -770,132 +822,23 @@ impl<'a> Parser<'a> {
 
     // Match and consume an i8 immediate.
     fn match_imm8(&mut self, err_msg: &str) -> ParseResult<i8> {
-        if let Some(Token::Integer(text)) = self.token() {
-            self.consume();
-            let negative = text.starts_with('-');
-            let positive = text.starts_with('+');
-            let text = if negative || positive {
-                // Strip sign prefix.
-                &text[1..]
-            } else {
-                text
-            };
-
-            // Parse the text value; the lexer gives us raw text that looks like an integer.
-            let value = if text.starts_with("0x") {
-                // Skip underscores.
-                let text = text.replace("_", "");
-                // Parse it as a i8 in hexadecimal form.
-                u8::from_str_radix(&text[2..], 16)
-                    .map_err(|_| self.error("unable to parse i8 as a hexadecimal immediate"))?
-            } else {
-                // Parse it as a i8 to check for overflow and other issues.
-                text.parse()
-                    .map_err(|_| self.error("expected i8 decimal immediate"))?
-            };
-
-            // Apply sign if necessary.
-            let signed = if negative {
-                let value = value.wrapping_neg() as i8;
-                if value > 0 {
-                    return Err(self.error("negative number too small"));
-                }
-                value
-            } else {
-                value as i8
-            };
-
-            Ok(signed)
-        } else {
-            err!(self.loc, err_msg)
-        }
+        match_imm!(i8, u8, self, err_msg)
     }
 
     // Match and consume a signed 16-bit immediate.
     fn match_imm16(&mut self, err_msg: &str) -> ParseResult<i16> {
-        if let Some(Token::Integer(text)) = self.token() {
-            self.consume();
-            let negative = text.starts_with('-');
-            let positive = text.starts_with('+');
-            let text = if negative || positive {
-                // Strip sign prefix.
-                &text[1..]
-            } else {
-                text
-            };
-
-            // Parse the text value; the lexer gives us raw text that looks like an integer.
-            let value = if text.starts_with("0x") {
-                // Skip underscores.
-                let text = text.replace("_", "");
-                // Parse it as a i16 in hexadecimal form.
-                u16::from_str_radix(&text[2..], 16)
-                    .map_err(|_| self.error("unable to parse i16 as a hexadecimal immediate"))?
-            } else {
-                // Parse it as a i16 to check for overflow and other issues.
-                text.parse()
-                    .map_err(|_| self.error("expected i16 decimal immediate"))?
-            };
-
-            // Apply sign if necessary.
-            let signed = if negative {
-                let value = value.wrapping_neg() as i16;
-                if value > 0 {
-                    return Err(self.error("negative number too small"));
-                }
-                value
-            } else {
-                value as i16
-            };
-
-            Ok(signed)
-        } else {
-            err!(self.loc, err_msg)
-        }
+        match_imm!(i16, u16, self, err_msg)
     }
 
     // Match and consume an i32 immediate.
     // This is used for stack argument byte offsets.
     fn match_imm32(&mut self, err_msg: &str) -> ParseResult<i32> {
-        if let Some(Token::Integer(text)) = self.token() {
-            self.consume();
-            let negative = text.starts_with('-');
-            let positive = text.starts_with('+');
-            let text = if negative || positive {
-                // Strip sign prefix.
-                &text[1..]
-            } else {
-                text
-            };
+        match_imm!(i32, u32, self, err_msg)
+    }
 
-            // Parse the text value; the lexer gives us raw text that looks like an integer.
-            let value = if text.starts_with("0x") {
-                // Skip underscores.
-                let text = text.replace("_", "");
-                // Parse it as a i32 in hexadecimal form.
-                u32::from_str_radix(&text[2..], 16)
-                    .map_err(|_| self.error("unable to parse i32 as a hexadecimal immediate"))?
-            } else {
-                // Parse it as a i32 to check for overflow and other issues.
-                text.parse()
-                    .map_err(|_| self.error("expected i32 decimal immediate"))?
-            };
-
-            // Apply sign if necessary.
-            let signed = if negative {
-                let value = value.wrapping_neg() as i32;
-                if value > 0 {
-                    return Err(self.error("negative number too small"));
-                }
-                value
-            } else {
-                value as i32
-            };
-
-            Ok(signed)
-        } else {
-            err!(self.loc, err_msg)
-        }
+    // Match and consume an i128 immediate.
+    fn match_imm128(&mut self, err_msg: &str) -> ParseResult<i128> {
+        match_imm!(i128, u128, self, err_msg)
     }
 
     // Match and consume an optional offset32 immediate.
@@ -1003,42 +946,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // Match and consume a HexSequence that fits into a u16.
-    // This is used for instruction encodings.
-    fn match_hex16(&mut self, err_msg: &str) -> ParseResult<u16> {
-        if let Some(Token::HexSequence(bits_str)) = self.token() {
-            self.consume();
-            // The only error we anticipate from this parse is overflow, the lexer should
-            // already have ensured that the string doesn't contain invalid characters, and
-            // isn't empty or negative.
-            u16::from_str_radix(bits_str, 16)
-                .map_err(|_| self.error("the hex sequence given overflows the u16 type"))
-        } else {
-            err!(self.loc, err_msg)
-        }
-    }
-
-    // Match and consume a register unit either by number `%15` or by name `%rax`.
-    fn match_regunit(&mut self, isa: Option<&dyn TargetIsa>) -> ParseResult<RegUnit> {
-        if let Some(Token::Name(name)) = self.token() {
-            self.consume();
-            match isa {
-                Some(isa) => isa
-                    .register_info()
-                    .parse_regunit(name)
-                    .ok_or_else(|| self.error("invalid register name")),
-                None => name
-                    .parse()
-                    .map_err(|_| self.error("invalid register number")),
-            }
-        } else {
-            match isa {
-                Some(isa) => err!(self.loc, "Expected {} register unit", isa.name()),
-                None => err!(self.loc, "Expected register unit number"),
-            }
-        }
-    }
-
     /// Parse an optional source location.
     ///
     /// Return an optional source location if no real location is present.
@@ -1083,7 +990,7 @@ impl<'a> Parser<'a> {
             err!(self.loc, "Expected a controlling vector type, not {}", ty)
         } else {
             let constant_data = match ty.lane_type() {
-                I8 => consume!(ty, self.match_uimm8("Expected an 8-bit unsigned integer")?),
+                I8 => consume!(ty, self.match_imm8("Expected an 8-bit integer")?),
                 I16 => consume!(ty, self.match_imm16("Expected a 16-bit integer")?),
                 I32 => consume!(ty, self.match_imm32("Expected a 32-bit integer")?),
                 I64 => consume!(ty, self.match_imm64("Expected a 64-bit integer")?),
@@ -1161,7 +1068,7 @@ impl<'a> Parser<'a> {
     ///
     /// Accept a mix of `target` and `set` command lines. The `set` commands are cumulative.
     ///
-    fn parse_target_specs(&mut self) -> ParseResult<isaspec::IsaSpec> {
+    fn parse_target_specs(&mut self, options: &ParseOptions) -> ParseResult<isaspec::IsaSpec> {
         // Were there any `target` commands?
         let mut seen_target = false;
         // Location of last `set` command since the last `target`.
@@ -1169,6 +1076,11 @@ impl<'a> Parser<'a> {
 
         let mut targets = Vec::new();
         let mut flag_builder = settings::builder();
+
+        let unwind_info = if options.unwind_info { "true" } else { "false" };
+        flag_builder
+            .set("unwind_info", unwind_info)
+            .expect("unwind_info option should be present");
 
         while let Some(Token::Identifier(command)) = self.token() {
             match command {
@@ -1185,7 +1097,7 @@ impl<'a> Parser<'a> {
                     let loc = self.loc;
                     // Grab the whole line so the lexer won't go looking for tokens on the
                     // following lines.
-                    let mut words = self.consume_line().trim().split_whitespace();
+                    let mut words = self.consume_line().trim().split_whitespace().peekable();
                     // Look for `target foo`.
                     let target_name = match words.next() {
                         Some(w) => w,
@@ -1253,13 +1165,10 @@ impl<'a> Parser<'a> {
     /// Parse a list of function definitions.
     ///
     /// This is the top-level parse function matching the whole contents of a file.
-    pub fn parse_function_list(
-        &mut self,
-        unique_isa: Option<&dyn TargetIsa>,
-    ) -> ParseResult<Vec<(Function, Details<'a>)>> {
+    pub fn parse_function_list(&mut self) -> ParseResult<Vec<(Function, Details<'a>)>> {
         let mut list = Vec::new();
         while self.token().is_some() {
-            list.push(self.parse_function(unique_isa)?);
+            list.push(self.parse_function()?);
         }
         if let Some(err) = self.lex_error {
             return match err {
@@ -1273,10 +1182,7 @@ impl<'a> Parser<'a> {
     //
     // function ::= * "function" name signature "{" preamble function-body "}"
     //
-    fn parse_function(
-        &mut self,
-        unique_isa: Option<&dyn TargetIsa>,
-    ) -> ParseResult<(Function, Details<'a>)> {
+    fn parse_function(&mut self) -> ParseResult<(Function, Details<'a>)> {
         // Begin gathering comments.
         // Make sure we don't include any comments before the `function` keyword.
         self.token();
@@ -1291,9 +1197,9 @@ impl<'a> Parser<'a> {
         let name = self.parse_external_name()?;
 
         // function ::= "function" name * signature "{" preamble function-body "}"
-        let sig = self.parse_signature(unique_isa)?;
+        let sig = self.parse_signature()?;
 
-        let mut ctx = Context::new(Function::with_name_signature(name, sig), unique_isa);
+        let mut ctx = Context::new(Function::with_name_signature(name, sig));
 
         // function ::= "function" name signature * "{" preamble function-body "}"
         self.match_token(Token::LBrace, "expected '{' before function body")?;
@@ -1363,18 +1269,18 @@ impl<'a> Parser<'a> {
     //
     // signature ::=  * "(" [paramlist] ")" ["->" retlist] [callconv]
     //
-    fn parse_signature(&mut self, unique_isa: Option<&dyn TargetIsa>) -> ParseResult<Signature> {
+    fn parse_signature(&mut self) -> ParseResult<Signature> {
         // Calling convention defaults to `fast`, but can be changed.
         let mut sig = Signature::new(self.default_calling_convention);
 
         self.match_token(Token::LPar, "expected function signature: ( args... )")?;
         // signature ::=  "(" * [abi-param-list] ")" ["->" retlist] [callconv]
         if self.token() != Some(Token::RPar) {
-            sig.params = self.parse_abi_param_list(unique_isa)?;
+            sig.params = self.parse_abi_param_list()?;
         }
         self.match_token(Token::RPar, "expected ')' after function arguments")?;
         if self.optional(Token::Arrow) {
-            sig.returns = self.parse_abi_param_list(unique_isa)?;
+            sig.returns = self.parse_abi_param_list()?;
         }
 
         // The calling convention is optional.
@@ -1395,26 +1301,23 @@ impl<'a> Parser<'a> {
     //
     // paramlist ::= * param { "," param }
     //
-    fn parse_abi_param_list(
-        &mut self,
-        unique_isa: Option<&dyn TargetIsa>,
-    ) -> ParseResult<Vec<AbiParam>> {
+    fn parse_abi_param_list(&mut self) -> ParseResult<Vec<AbiParam>> {
         let mut list = Vec::new();
 
         // abi-param-list ::= * abi-param { "," abi-param }
-        list.push(self.parse_abi_param(unique_isa)?);
+        list.push(self.parse_abi_param()?);
 
         // abi-param-list ::= abi-param * { "," abi-param }
         while self.optional(Token::Comma) {
             // abi-param-list ::= abi-param { "," * abi-param }
-            list.push(self.parse_abi_param(unique_isa)?);
+            list.push(self.parse_abi_param()?);
         }
 
         Ok(list)
     }
 
     // Parse a single argument type with flags.
-    fn parse_abi_param(&mut self, unique_isa: Option<&dyn TargetIsa>) -> ParseResult<AbiParam> {
+    fn parse_abi_param(&mut self) -> ParseResult<AbiParam> {
         // abi-param ::= * type { flag } [ argumentloc ]
         let mut arg = AbiParam::new(self.match_type("expected parameter type")?);
 
@@ -1423,6 +1326,14 @@ impl<'a> Parser<'a> {
             match s {
                 "uext" => arg.extension = ArgumentExtension::Uext,
                 "sext" => arg.extension = ArgumentExtension::Sext,
+                "sarg" => {
+                    self.consume();
+                    self.match_token(Token::LPar, "expected '(' to begin sarg size")?;
+                    let size = self.match_uimm32("expected byte-size in sarg decl")?;
+                    self.match_token(Token::RPar, "expected ')' to end sarg size")?;
+                    arg.purpose = ArgumentPurpose::StructArgument(size.into());
+                    continue;
+                }
                 _ => {
                     if let Ok(purpose) = s.parse() {
                         arg.purpose = purpose;
@@ -1434,51 +1345,7 @@ impl<'a> Parser<'a> {
             self.consume();
         }
 
-        // abi-param ::= type { flag } * [ argumentloc ]
-        arg.location = self.parse_argument_location(unique_isa)?;
-
         Ok(arg)
-    }
-
-    // Parse an argument location specifier; either a register or a byte offset into the stack.
-    fn parse_argument_location(
-        &mut self,
-        unique_isa: Option<&dyn TargetIsa>,
-    ) -> ParseResult<ArgumentLoc> {
-        // argumentloc ::= '[' regname | uimm32 ']'
-        if self.optional(Token::LBracket) {
-            let result = match self.token() {
-                Some(Token::Name(name)) => {
-                    self.consume();
-                    if let Some(isa) = unique_isa {
-                        isa.register_info()
-                            .parse_regunit(name)
-                            .map(ArgumentLoc::Reg)
-                            .ok_or_else(|| self.error("invalid register name"))
-                    } else {
-                        err!(self.loc, "argument location requires exactly one isa")
-                    }
-                }
-                Some(Token::Integer(_)) => {
-                    let offset = self.match_imm32("expected stack argument byte offset")?;
-                    Ok(ArgumentLoc::Stack(offset))
-                }
-                Some(Token::Minus) => {
-                    self.consume();
-                    Ok(ArgumentLoc::Unassigned)
-                }
-                _ => err!(self.loc, "expected argument location"),
-            };
-
-            self.match_token(
-                Token::RBracket,
-                "expected ']' to end argument location annotation",
-            )?;
-
-            result
-        } else {
-            Ok(ArgumentLoc::Unassigned)
-        }
     }
 
     // Parse the function preamble.
@@ -1517,10 +1384,9 @@ impl<'a> Parser<'a> {
                 }
                 Some(Token::SigRef(..)) => {
                     self.start_gathering_comments();
-                    self.parse_signature_decl(ctx.unique_isa)
-                        .and_then(|(sig, dat)| {
-                            ctx.add_sig(sig, dat, self.loc, self.default_calling_convention)
-                        })
+                    self.parse_signature_decl().and_then(|(sig, dat)| {
+                        ctx.add_sig(sig, dat, self.loc, self.default_calling_convention)
+                    })
                 }
                 Some(Token::FuncRef(..)) => {
                     self.start_gathering_comments();
@@ -1570,15 +1436,7 @@ impl<'a> Parser<'a> {
         if bytes > i64::from(u32::MAX) {
             return err!(self.loc, "stack slot too large");
         }
-        let mut data = StackSlotData::new(kind, bytes as u32);
-
-        // Take additional options.
-        while self.optional(Token::Comma) {
-            match self.match_any_identifier("expected stack slot flags")? {
-                "offset" => data.offset = Some(self.match_imm32("expected byte offset")?),
-                other => return err!(self.loc, "Unknown stack slot flag '{}'", other),
-            }
-        }
+        let data = StackSlotData::new(kind, bytes as u32);
 
         // Collect any trailing comments.
         self.token();
@@ -1803,13 +1661,10 @@ impl<'a> Parser<'a> {
     //
     // signature-decl ::= SigRef(sigref) "=" signature
     //
-    fn parse_signature_decl(
-        &mut self,
-        unique_isa: Option<&dyn TargetIsa>,
-    ) -> ParseResult<(SigRef, Signature)> {
+    fn parse_signature_decl(&mut self) -> ParseResult<(SigRef, Signature)> {
         let sig = self.match_sig("expected signature number: sig«n»")?;
         self.match_token(Token::Equal, "expected '=' in signature decl")?;
-        let data = self.parse_signature(unique_isa)?;
+        let data = self.parse_signature()?;
 
         // Collect any trailing comments.
         self.token();
@@ -1844,7 +1699,7 @@ impl<'a> Parser<'a> {
         let data = match self.token() {
             Some(Token::LPar) => {
                 // function-decl ::= FuncRef(fnref) "=" ["colocated"] name * signature
-                let sig = self.parse_signature(ctx.unique_isa)?;
+                let sig = self.parse_signature()?;
                 let sigref = ctx.function.import_signature(sig);
                 ctx.map
                     .def_entity(sigref.into(), loc)
@@ -2006,7 +1861,8 @@ impl<'a> Parser<'a> {
     // Parse a basic block, add contents to `ctx`.
     //
     // extended-basic-block ::= * block-header { instruction }
-    // block-header           ::= Block(block) [block-params] ":"
+    // block-header         ::= Block(block) [block-params] [block-flags] ":"
+    // block-flags          ::= [Cold]
     //
     fn parse_basic_block(&mut self, ctx: &mut Context) -> ParseResult<()> {
         // Collect comments for the next block.
@@ -2019,11 +1875,15 @@ impl<'a> Parser<'a> {
             return Err(self.error("too many blocks"));
         }
 
-        if !self.optional(Token::Colon) {
-            // block-header ::= Block(block) [ * block-params ] ":"
+        if self.token() == Some(Token::LPar) {
             self.parse_block_params(ctx, block)?;
-            self.match_token(Token::Colon, "expected ':' after block parameters")?;
         }
+
+        if self.optional(Token::Cold) {
+            ctx.set_cold_block(block);
+        }
+
+        self.match_token(Token::Colon, "expected ':' after block parameters")?;
 
         // Collect any trailing comments.
         self.token();
@@ -2038,7 +1898,6 @@ impl<'a> Parser<'a> {
             _ => false,
         } {
             let srcloc = self.optional_srcloc()?;
-            let (encoding, result_locations) = self.parse_instruction_encoding(ctx)?;
 
             // We need to parse instruction results here because they are shared
             // between the parsing of value aliases and the parsing of instructions.
@@ -2059,24 +1918,10 @@ impl<'a> Parser<'a> {
                 }
                 Some(Token::Equal) => {
                     self.consume();
-                    self.parse_instruction(
-                        &results,
-                        srcloc,
-                        encoding,
-                        result_locations,
-                        ctx,
-                        block,
-                    )?;
+                    self.parse_instruction(&results, srcloc, ctx, block)?;
                 }
                 _ if !results.is_empty() => return err!(self.loc, "expected -> or ="),
-                _ => self.parse_instruction(
-                    &results,
-                    srcloc,
-                    encoding,
-                    result_locations,
-                    ctx,
-                    block,
-                )?,
+                _ => self.parse_instruction(&results, srcloc, ctx, block)?,
             }
         }
 
@@ -2128,95 +1973,7 @@ impl<'a> Parser<'a> {
         ctx.function.dfg.append_block_param_for_parser(block, t, v);
         ctx.map.def_value(v, v_location)?;
 
-        // block-param ::= Value(v) ":" Type(t) * arg-loc?
-        if self.optional(Token::LBracket) {
-            let loc = self.parse_value_location(ctx)?;
-            ctx.function.locations[v] = loc;
-            self.match_token(Token::RBracket, "expected ']' after value location")?;
-        }
-
         Ok(())
-    }
-
-    fn parse_value_location(&mut self, ctx: &Context) -> ParseResult<ValueLoc> {
-        match self.token() {
-            Some(Token::StackSlot(src_num)) => {
-                self.consume();
-                let ss = match StackSlot::with_number(src_num) {
-                    None => {
-                        return err!(
-                            self.loc,
-                            "attempted to use invalid stack slot ss{}",
-                            src_num
-                        );
-                    }
-                    Some(ss) => ss,
-                };
-                ctx.check_ss(ss, self.loc)?;
-                Ok(ValueLoc::Stack(ss))
-            }
-            Some(Token::Name(name)) => {
-                self.consume();
-                if let Some(isa) = ctx.unique_isa {
-                    isa.register_info()
-                        .parse_regunit(name)
-                        .map(ValueLoc::Reg)
-                        .ok_or_else(|| self.error("invalid register value location"))
-                } else {
-                    err!(self.loc, "value location requires exactly one isa")
-                }
-            }
-            Some(Token::Minus) => {
-                self.consume();
-                Ok(ValueLoc::Unassigned)
-            }
-            _ => err!(self.loc, "invalid value location"),
-        }
-    }
-
-    fn parse_instruction_encoding(
-        &mut self,
-        ctx: &Context,
-    ) -> ParseResult<(Option<Encoding>, Option<Vec<ValueLoc>>)> {
-        let (mut encoding, mut result_locations) = (None, None);
-
-        // encoding ::= "[" encoding_literal result_locations "]"
-        if self.optional(Token::LBracket) {
-            // encoding_literal ::= "-" | Identifier HexSequence
-            if !self.optional(Token::Minus) {
-                let recipe = self.match_any_identifier("expected instruction encoding or '-'")?;
-                let bits = self.match_hex16("expected a hex sequence")?;
-
-                if let Some(recipe_index) = ctx.find_recipe_index(recipe) {
-                    encoding = Some(Encoding::new(recipe_index, bits));
-                } else if ctx.unique_isa.is_some() {
-                    return err!(self.loc, "invalid instruction recipe");
-                } else {
-                    // We allow encodings to be specified when there's no unique ISA purely
-                    // for convenience, eg when copy-pasting code for a test.
-                }
-            }
-
-            // result_locations ::= ("," ( "-" | names ) )?
-            // names ::= Name { "," Name }
-            if self.optional(Token::Comma) {
-                let mut results = Vec::new();
-
-                results.push(self.parse_value_location(ctx)?);
-                while self.optional(Token::Comma) {
-                    results.push(self.parse_value_location(ctx)?);
-                }
-
-                result_locations = Some(results);
-            }
-
-            self.match_token(
-                Token::RBracket,
-                "expected ']' to terminate instruction encoding",
-            )?;
-        }
-
-        Ok((encoding, result_locations))
     }
 
     // Parse instruction results and return them.
@@ -2293,8 +2050,6 @@ impl<'a> Parser<'a> {
         &mut self,
         results: &[Value],
         srcloc: ir::SourceLoc,
-        encoding: Option<Encoding>,
-        result_locations: Option<Vec<ValueLoc>>,
         ctx: &mut Context,
         block: Block,
     ) -> ParseResult<()> {
@@ -2349,10 +2104,6 @@ impl<'a> Parser<'a> {
             ctx.function.srclocs[inst] = srcloc;
         }
 
-        if let Some(encoding) = encoding {
-            ctx.function.encodings[inst] = encoding;
-        }
-
         if results.len() != num_results {
             return err!(
                 self.loc,
@@ -2360,30 +2111,6 @@ impl<'a> Parser<'a> {
                 num_results,
                 results.len()
             );
-        }
-
-        if let Some(ref result_locations) = result_locations {
-            if results.len() != result_locations.len() {
-                return err!(
-                    self.loc,
-                    "instruction produces {} result values, but {} locations were \
-                     specified",
-                    results.len(),
-                    result_locations.len()
-                );
-            }
-        }
-
-        if let Some(result_locations) = result_locations {
-            for (&value, loc) in ctx
-                .function
-                .dfg
-                .inst_results(inst)
-                .iter()
-                .zip(result_locations)
-            {
-                ctx.function.locations[value] = loc;
-            }
         }
 
         // Collect any trailing comments.
@@ -2530,6 +2257,86 @@ impl<'a> Parser<'a> {
         Ok(args)
     }
 
+    /// Parse a vmctx offset annotation
+    ///
+    /// vmctx-offset ::= "vmctx" "+" UImm64(offset)
+    fn parse_vmctx_offset(&mut self) -> ParseResult<Uimm64> {
+        self.match_token(Token::Identifier("vmctx"), "expected a 'vmctx' token")?;
+
+        // The '+' token here gets parsed as part of the integer text, so we can't just match_token it
+        // and `match_uimm64` doesn't support leading '+' tokens, so we can't use that either.
+        match self.token() {
+            Some(Token::Integer(text)) if text.starts_with('+') => {
+                self.consume();
+
+                text[1..]
+                    .parse()
+                    .map_err(|_| self.error("expected u64 decimal immediate"))
+            }
+            token => err!(
+                self.loc,
+                format!("Unexpected token {:?} after vmctx", token)
+            ),
+        }
+    }
+
+    /// Parse a CLIF heap command.
+    ///
+    /// heap-command ::= "heap" ":" heap-type { "," heap-attr }
+    /// heap-attr ::= "size" "=" UImm64(bytes)
+    fn parse_heap_command(&mut self) -> ParseResult<HeapCommand> {
+        self.match_token(Token::Identifier("heap"), "expected a 'heap:' command")?;
+        self.match_token(Token::Colon, "expected a ':' after heap command")?;
+
+        let mut heap_command = HeapCommand {
+            heap_type: self.parse_heap_type()?,
+            size: Uimm64::new(0),
+            ptr_offset: None,
+            bound_offset: None,
+        };
+
+        while self.optional(Token::Comma) {
+            let identifier = self.match_any_identifier("expected heap attribute name")?;
+            self.match_token(Token::Equal, "expected '=' after heap attribute name")?;
+
+            match identifier {
+                "size" => {
+                    heap_command.size = self.match_uimm64("expected integer size")?;
+                }
+                "ptr" => {
+                    heap_command.ptr_offset = Some(self.parse_vmctx_offset()?);
+                }
+                "bound" => {
+                    heap_command.bound_offset = Some(self.parse_vmctx_offset()?);
+                }
+                t => return err!(self.loc, "unknown heap attribute '{}'", t),
+            }
+        }
+
+        if heap_command.size == Uimm64::new(0) {
+            return err!(self.loc, self.error("Expected a heap size to be specified"));
+        }
+
+        Ok(heap_command)
+    }
+
+    /// Parse a heap type.
+    ///
+    /// heap-type ::= "static" | "dynamic"
+    fn parse_heap_type(&mut self) -> ParseResult<HeapType> {
+        match self.token() {
+            Some(Token::Identifier("static")) => {
+                self.consume();
+                Ok(HeapType::Static)
+            }
+            Some(Token::Identifier("dynamic")) => {
+                self.consume();
+                Ok(HeapType::Dynamic)
+            }
+            _ => Err(self.error("expected a heap type, e.g. static or dynamic")),
+        }
+    }
+
     /// Parse a CLIF run command.
     ///
     /// run-command ::= "run" [":" invocation comparison expected]
@@ -2589,9 +2396,22 @@ impl<'a> Parser<'a> {
                 "expected invocation parentheses, e.g. %fn(...)",
             )?;
 
-            let args = self.parse_data_value_list(
-                &sig.params.iter().map(|a| a.value_type).collect::<Vec<_>>(),
-            )?;
+            let arg_types = sig
+                .params
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| {
+                    // The first argument being VMCtx indicates that this is a argument that is going
+                    // to be passed in with info about the test environment, and should not be passed
+                    // in the run params.
+                    if p.purpose == ir::ArgumentPurpose::VMContext && i == 0 {
+                        None
+                    } else {
+                        Some(p.value_type)
+                    }
+                })
+                .collect::<Vec<_>>();
+            let args = self.parse_data_value_list(&arg_types)?;
 
             self.match_token(
                 Token::RPar,
@@ -2664,8 +2484,9 @@ impl<'a> Parser<'a> {
             I16 => DataValue::from(self.match_imm16("expected an i16")?),
             I32 => DataValue::from(self.match_imm32("expected an i32")?),
             I64 => DataValue::from(Into::<i64>::into(self.match_imm64("expected an i64")?)),
-            F32 => DataValue::from(f32::from_bits(self.match_ieee32("expected an f32")?.bits())),
-            F64 => DataValue::from(f64::from_bits(self.match_ieee64("expected an f64")?.bits())),
+            I128 => DataValue::from(self.match_imm128("expected an i128")?),
+            F32 => DataValue::from(self.match_ieee32("expected an f32")?),
+            F64 => DataValue::from(self.match_ieee64("expected an f64")?),
             _ if ty.is_vector() => {
                 let as_vec = self.match_uimm128(ty)?.into_vec();
                 if as_vec.len() == 16 {
@@ -2865,34 +2686,6 @@ impl<'a> Parser<'a> {
                     table,
                 }
             }
-            InstructionFormat::BranchTableBase => {
-                let table = self.match_jt()?;
-                ctx.check_jt(table, self.loc)?;
-                InstructionData::BranchTableBase { opcode, table }
-            }
-            InstructionFormat::BranchTableEntry => {
-                let index = self.match_value("expected SSA value operand")?;
-                self.match_token(Token::Comma, "expected ',' between operands")?;
-                let base = self.match_value("expected SSA value operand")?;
-                self.match_token(Token::Comma, "expected ',' between operands")?;
-                let imm = self.match_uimm8("expected width")?;
-                self.match_token(Token::Comma, "expected ',' between operands")?;
-                let table = self.match_jt()?;
-                ctx.check_jt(table, self.loc)?;
-                InstructionData::BranchTableEntry {
-                    opcode,
-                    args: [index, base],
-                    imm,
-                    table,
-                }
-            }
-            InstructionFormat::IndirectJump => {
-                let arg = self.match_value("expected SSA value operand")?;
-                self.match_token(Token::Comma, "expected ',' between operands")?;
-                let table = self.match_jt()?;
-                ctx.check_jt(table, self.loc)?;
-                InstructionData::IndirectJump { opcode, arg, table }
-            }
             InstructionFormat::TernaryImm8 => {
                 let lhs = self.match_value("expected SSA value first operand")?;
                 self.match_token(Token::Comma, "expected ',' between operands")?;
@@ -2911,10 +2704,10 @@ impl<'a> Parser<'a> {
                 let b = self.match_value("expected SSA value second operand")?;
                 self.match_token(Token::Comma, "expected ',' between operands")?;
                 let uimm128 = self.match_uimm128(I8X16)?;
-                let mask = ctx.function.dfg.immediates.push(uimm128);
+                let imm = ctx.function.dfg.immediates.push(uimm128);
                 InstructionData::Shuffle {
                     opcode,
-                    mask,
+                    imm,
                     args: [a, b],
                 }
             }
@@ -3106,60 +2899,6 @@ impl<'a> Parser<'a> {
                     offset,
                 }
             }
-            InstructionFormat::RegMove => {
-                let arg = self.match_value("expected SSA value operand")?;
-                self.match_token(Token::Comma, "expected ',' between operands")?;
-                let src = self.match_regunit(ctx.unique_isa)?;
-                self.match_token(Token::Arrow, "expected '->' between register units")?;
-                let dst = self.match_regunit(ctx.unique_isa)?;
-                InstructionData::RegMove {
-                    opcode,
-                    arg,
-                    src,
-                    dst,
-                }
-            }
-            InstructionFormat::CopySpecial => {
-                let src = self.match_regunit(ctx.unique_isa)?;
-                self.match_token(Token::Arrow, "expected '->' between register units")?;
-                let dst = self.match_regunit(ctx.unique_isa)?;
-                InstructionData::CopySpecial { opcode, src, dst }
-            }
-            InstructionFormat::CopyToSsa => InstructionData::CopyToSsa {
-                opcode,
-                src: self.match_regunit(ctx.unique_isa)?,
-            },
-            InstructionFormat::RegSpill => {
-                let arg = self.match_value("expected SSA value operand")?;
-                self.match_token(Token::Comma, "expected ',' between operands")?;
-                let src = self.match_regunit(ctx.unique_isa)?;
-                self.match_token(Token::Arrow, "expected '->' before destination stack slot")?;
-                let dst = self.match_ss("expected stack slot number: ss«n»")?;
-                ctx.check_ss(dst, self.loc)?;
-                InstructionData::RegSpill {
-                    opcode,
-                    arg,
-                    src,
-                    dst,
-                }
-            }
-            InstructionFormat::RegFill => {
-                let arg = self.match_value("expected SSA value operand")?;
-                self.match_token(Token::Comma, "expected ',' between operands")?;
-                let src = self.match_ss("expected stack slot number: ss«n»")?;
-                ctx.check_ss(src, self.loc)?;
-                self.match_token(
-                    Token::Arrow,
-                    "expected '->' before destination register units",
-                )?;
-                let dst = self.match_regunit(ctx.unique_isa)?;
-                InstructionData::RegFill {
-                    opcode,
-                    arg,
-                    src,
-                    dst,
-                }
-            }
             InstructionFormat::Trap => {
                 let code = self.match_enum("expected trap code")?;
                 InstructionData::Trap { opcode, code }
@@ -3194,6 +2933,52 @@ impl<'a> Parser<'a> {
                     code,
                 }
             }
+            InstructionFormat::AtomicCas => {
+                let flags = self.optional_memflags();
+                let addr = self.match_value("expected SSA value address")?;
+                self.match_token(Token::Comma, "expected ',' between operands")?;
+                let expected = self.match_value("expected SSA value address")?;
+                self.match_token(Token::Comma, "expected ',' between operands")?;
+                let replacement = self.match_value("expected SSA value address")?;
+                InstructionData::AtomicCas {
+                    opcode,
+                    flags,
+                    args: [addr, expected, replacement],
+                }
+            }
+            InstructionFormat::AtomicRmw => {
+                let flags = self.optional_memflags();
+                let op = self.match_enum("expected AtomicRmwOp")?;
+                let addr = self.match_value("expected SSA value address")?;
+                self.match_token(Token::Comma, "expected ',' between operands")?;
+                let arg2 = self.match_value("expected SSA value address")?;
+                InstructionData::AtomicRmw {
+                    opcode,
+                    flags,
+                    op,
+                    args: [addr, arg2],
+                }
+            }
+            InstructionFormat::LoadNoOffset => {
+                let flags = self.optional_memflags();
+                let addr = self.match_value("expected SSA value address")?;
+                InstructionData::LoadNoOffset {
+                    opcode,
+                    flags,
+                    arg: addr,
+                }
+            }
+            InstructionFormat::StoreNoOffset => {
+                let flags = self.optional_memflags();
+                let arg = self.match_value("expected SSA value operand")?;
+                self.match_token(Token::Comma, "expected ',' between operands")?;
+                let addr = self.match_value("expected SSA value address")?;
+                InstructionData::StoreNoOffset {
+                    opcode,
+                    flags,
+                    args: [arg, addr],
+                }
+            }
         };
         Ok(idata)
     }
@@ -3214,7 +2999,7 @@ mod tests {
     #[test]
     fn argument_type() {
         let mut p = Parser::new("i32 sext");
-        let arg = p.parse_abi_param(None).unwrap();
+        let arg = p.parse_abi_param().unwrap();
         assert_eq!(arg.value_type, types::I32);
         assert_eq!(arg.extension, ArgumentExtension::Sext);
         assert_eq!(arg.purpose, ArgumentPurpose::Normal);
@@ -3222,7 +3007,7 @@ mod tests {
             location,
             message,
             is_warning,
-        } = p.parse_abi_param(None).unwrap_err();
+        } = p.parse_abi_param().unwrap_err();
         assert_eq!(location.line_number, 1);
         assert_eq!(message, "expected parameter type");
         assert!(!is_warning);
@@ -3238,7 +3023,7 @@ mod tests {
                                              v1 = iadd_imm v3, 17
                                            }",
         )
-        .parse_function(None)
+        .parse_function()
         .unwrap();
         assert_eq!(func.name.to_string(), "%qux");
         let v4 = details.map.lookup_str("v4").unwrap();
@@ -3256,13 +3041,13 @@ mod tests {
 
     #[test]
     fn signature() {
-        let sig = Parser::new("()system_v").parse_signature(None).unwrap();
+        let sig = Parser::new("()system_v").parse_signature().unwrap();
         assert_eq!(sig.params.len(), 0);
         assert_eq!(sig.returns.len(), 0);
         assert_eq!(sig.call_conv, CallConv::SystemV);
 
         let sig2 = Parser::new("(i8 uext, f32, f64, i32 sret) -> i32 sext, f64 baldrdash_system_v")
-            .parse_signature(None)
+            .parse_signature()
             .unwrap();
         assert_eq!(
             sig2.to_string(),
@@ -3272,12 +3057,12 @@ mod tests {
 
         // Old-style signature without a calling convention.
         assert_eq!(
-            Parser::new("()").parse_signature(None).unwrap().to_string(),
+            Parser::new("()").parse_signature().unwrap().to_string(),
             "() fast"
         );
         assert_eq!(
             Parser::new("() notacc")
-                .parse_signature(None)
+                .parse_signature()
                 .unwrap_err()
                 .to_string(),
             "1: unknown calling convention: notacc"
@@ -3286,21 +3071,21 @@ mod tests {
         // `void` is not recognized as a type by the lexer. It should not appear in files.
         assert_eq!(
             Parser::new("() -> void")
-                .parse_signature(None)
+                .parse_signature()
                 .unwrap_err()
                 .to_string(),
             "1: expected parameter type"
         );
         assert_eq!(
             Parser::new("i8 -> i8")
-                .parse_signature(None)
+                .parse_signature()
                 .unwrap_err()
                 .to_string(),
             "1: expected function signature: ( args... )"
         );
         assert_eq!(
             Parser::new("(i8 -> i8")
-                .parse_signature(None)
+                .parse_signature()
                 .unwrap_err()
                 .to_string(),
             "1: expected ')' after function arguments"
@@ -3311,23 +3096,23 @@ mod tests {
     fn stack_slot_decl() {
         let (func, _) = Parser::new(
             "function %foo() system_v {
-                                       ss3 = incoming_arg 13
-                                       ss1 = spill_slot 1
+                                       ss3 = explicit_slot 13
+                                       ss1 = explicit_slot 1
                                      }",
         )
-        .parse_function(None)
+        .parse_function()
         .unwrap();
         assert_eq!(func.name.to_string(), "%foo");
         let mut iter = func.stack_slots.keys();
         let _ss0 = iter.next().unwrap();
         let ss1 = iter.next().unwrap();
         assert_eq!(ss1.to_string(), "ss1");
-        assert_eq!(func.stack_slots[ss1].kind, StackSlotKind::SpillSlot);
+        assert_eq!(func.stack_slots[ss1].kind, StackSlotKind::ExplicitSlot);
         assert_eq!(func.stack_slots[ss1].size, 1);
         let _ss2 = iter.next().unwrap();
         let ss3 = iter.next().unwrap();
         assert_eq!(ss3.to_string(), "ss3");
-        assert_eq!(func.stack_slots[ss3].kind, StackSlotKind::IncomingArg);
+        assert_eq!(func.stack_slots[ss3].kind, StackSlotKind::ExplicitSlot);
         assert_eq!(func.stack_slots[ss3].size, 13);
         assert_eq!(iter.next(), None);
 
@@ -3335,11 +3120,11 @@ mod tests {
         assert_eq!(
             Parser::new(
                 "function %bar() system_v {
-                                    ss1  = spill_slot 13
-                                    ss1  = spill_slot 1
+                                    ss1  = explicit_slot 13
+                                    ss1  = explicit_slot 1
                                 }",
             )
-            .parse_function(None)
+            .parse_function()
             .unwrap_err()
             .to_string(),
             "3: duplicate entity: ss1"
@@ -3354,7 +3139,7 @@ mod tests {
                                      block4(v3: i32):
                                      }",
         )
-        .parse_function(None)
+        .parse_function()
         .unwrap();
         assert_eq!(func.name.to_string(), "%blocks");
 
@@ -3381,7 +3166,7 @@ mod tests {
                 block0:
                     return 2",
         )
-        .parse_function(None)
+        .parse_function()
         .unwrap_err();
 
         assert_eq!(location.line_number, 3);
@@ -3399,7 +3184,7 @@ mod tests {
             "function %a() {
                 block100000:",
         )
-        .parse_function(None)
+        .parse_function()
         .unwrap_err();
 
         assert_eq!(location.line_number, 2);
@@ -3418,7 +3203,7 @@ mod tests {
                 jt0 = jump_table []
                 jt0 = jump_table []",
         )
-        .parse_function(None)
+        .parse_function()
         .unwrap_err();
 
         assert_eq!(location.line_number, 3);
@@ -3437,7 +3222,7 @@ mod tests {
                 ss0 = explicit_slot 8
                 ss0 = explicit_slot 8",
         )
-        .parse_function(None)
+        .parse_function()
         .unwrap_err();
 
         assert_eq!(location.line_number, 3);
@@ -3456,7 +3241,7 @@ mod tests {
                 gv0 = vmctx
                 gv0 = vmctx",
         )
-        .parse_function(None)
+        .parse_function()
         .unwrap_err();
 
         assert_eq!(location.line_number, 3);
@@ -3475,7 +3260,7 @@ mod tests {
                 heap0 = static gv0, min 0x1000, bound 0x10_0000, offset_guard 0x1000
                 heap0 = static gv0, min 0x1000, bound 0x10_0000, offset_guard 0x1000",
         )
-        .parse_function(None)
+        .parse_function()
         .unwrap_err();
 
         assert_eq!(location.line_number, 3);
@@ -3494,7 +3279,7 @@ mod tests {
                 sig0 = ()
                 sig0 = ()",
         )
-        .parse_function(None)
+        .parse_function()
         .unwrap_err();
 
         assert_eq!(location.line_number, 3);
@@ -3514,7 +3299,7 @@ mod tests {
                 fn0 = %foo sig0
                 fn0 = %foo sig0",
         )
-        .parse_function(None)
+        .parse_function()
         .unwrap_err();
 
         assert_eq!(location.line_number, 4);
@@ -3527,7 +3312,7 @@ mod tests {
         let (func, Details { comments, .. }) = Parser::new(
             "; before
                          function %comment() system_v { ; decl
-                            ss10  = outgoing_arg 13 ; stackslot.
+                            ss10  = explicit_slot 13 ; stackslot.
                             ; Still stackslot.
                             jt10 = jump_table [block0]
                             ; Jumptable
@@ -3536,7 +3321,7 @@ mod tests {
                          } ; Trailing.
                          ; More trailing.",
         )
-        .parse_function(None)
+        .parse_function()
         .unwrap();
         assert_eq!(func.name.to_string(), "%comment");
         assert_eq!(comments.len(), 8); // no 'before' comment.
@@ -3596,7 +3381,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "riscv")]
     fn isa_spec() {
         assert!(parse_test(
             "target
@@ -3606,7 +3390,7 @@ mod tests {
         .is_err());
 
         assert!(parse_test(
-            "target riscv32
+            "target x86_64
                             set enable_float=false
                             function %foo() system_v {}",
             ParseOptions::default()
@@ -3615,7 +3399,7 @@ mod tests {
 
         match parse_test(
             "set enable_float=false
-                          isa riscv
+                          target x86_64
                           function %foo() system_v {}",
             ParseOptions::default(),
         )
@@ -3625,7 +3409,7 @@ mod tests {
             IsaSpec::None(_) => panic!("Expected some ISA"),
             IsaSpec::Some(v) => {
                 assert_eq!(v.len(), 1);
-                assert_eq!(v[0].name(), "riscv");
+                assert!(v[0].name() == "x64" || v[0].name() == "x86");
             }
         }
     }
@@ -3639,7 +3423,7 @@ mod tests {
                                              trap int_divz
                                            }",
         )
-        .parse_function(None)
+        .parse_function()
         .unwrap()
         .0;
         assert_eq!(func.name.to_string(), "u1:2");
@@ -3651,7 +3435,7 @@ mod tests {
                                              trap stk_ovf
                                            }",
         );
-        assert!(parser.parse_function(None).is_err());
+        assert!(parser.parse_function().is_err());
 
         // Incomplete function names should not be valid:
         let mut parser = Parser::new(
@@ -3660,7 +3444,7 @@ mod tests {
                                              trap int_ovf
                                            }",
         );
-        assert!(parser.parse_function(None).is_err());
+        assert!(parser.parse_function().is_err());
 
         let mut parser = Parser::new(
             "function u0() system_v {
@@ -3668,7 +3452,7 @@ mod tests {
                                              trap int_ovf
                                            }",
         );
-        assert!(parser.parse_function(None).is_err());
+        assert!(parser.parse_function().is_err());
 
         let mut parser = Parser::new(
             "function u0:() system_v {
@@ -3676,7 +3460,7 @@ mod tests {
                                              trap int_ovf
                                            }",
         );
-        assert!(parser.parse_function(None).is_err());
+        assert!(parser.parse_function().is_err());
     }
 
     #[test]
@@ -3689,14 +3473,14 @@ mod tests {
         // By default the parser will use the fast calling convention if none is specified.
         let mut parser = Parser::new(code);
         assert_eq!(
-            parser.parse_function(None).unwrap().0.signature.call_conv,
+            parser.parse_function().unwrap().0.signature.call_conv,
             CallConv::Fast
         );
 
         // However, we can specify a different calling convention to be the default.
         let mut parser = Parser::new(code).with_default_calling_convention(CallConv::Cold);
         assert_eq!(
-            parser.parse_function(None).unwrap().0.signature.call_conv,
+            parser.parse_function().unwrap().0.signature.call_conv,
             CallConv::Cold
         );
     }
@@ -3892,6 +3676,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_heap_commands() {
+        fn parse(text: &str) -> ParseResult<HeapCommand> {
+            Parser::new(text).parse_heap_command()
+        }
+
+        // Check that we can parse and display the same set of heap commands.
+        fn assert_roundtrip(text: &str) {
+            assert_eq!(parse(text).unwrap().to_string(), text);
+        }
+
+        assert_roundtrip("heap: static, size=10");
+        assert_roundtrip("heap: dynamic, size=10");
+        assert_roundtrip("heap: static, size=10, ptr=vmctx+10");
+        assert_roundtrip("heap: static, size=10, bound=vmctx+11");
+        assert_roundtrip("heap: static, size=10, ptr=vmctx+10, bound=vmctx+10");
+        assert_roundtrip("heap: dynamic, size=10, ptr=vmctx+10");
+        assert_roundtrip("heap: dynamic, size=10, bound=vmctx+11");
+        assert_roundtrip("heap: dynamic, size=10, ptr=vmctx+10, bound=vmctx+10");
+
+        let static_heap = parse("heap: static, size=10, ptr=vmctx+8, bound=vmctx+2").unwrap();
+        assert_eq!(static_heap.size, Uimm64::new(10));
+        assert_eq!(static_heap.heap_type, HeapType::Static);
+        assert_eq!(static_heap.ptr_offset, Some(Uimm64::new(8)));
+        assert_eq!(static_heap.bound_offset, Some(Uimm64::new(2)));
+        let dynamic_heap = parse("heap: dynamic, size=0x10").unwrap();
+        assert_eq!(dynamic_heap.size, Uimm64::new(16));
+        assert_eq!(dynamic_heap.heap_type, HeapType::Dynamic);
+        assert_eq!(dynamic_heap.ptr_offset, None);
+        assert_eq!(dynamic_heap.bound_offset, None);
+
+        assert!(parse("heap: static").is_err());
+        assert!(parse("heap: dynamic").is_err());
+        assert!(parse("heap: static size=0").is_err());
+        assert!(parse("heap: dynamic size=0").is_err());
+        assert!(parse("heap: static, size=10, ptr=10").is_err());
+        assert!(parse("heap: static, size=10, bound=vmctx-10").is_err());
+    }
+
+    #[test]
     fn parse_data_values() {
         fn parse(text: &str, ty: Type) -> DataValue {
             Parser::new(text).parse_data_value(ty).unwrap()
@@ -3901,6 +3724,11 @@ mod tests {
         assert_eq!(parse("16", I16).to_string(), "16");
         assert_eq!(parse("32", I32).to_string(), "32");
         assert_eq!(parse("64", I64).to_string(), "64");
+        assert_eq!(
+            parse("0x01234567_01234567_01234567_01234567", I128).to_string(),
+            "1512366032949150931280199141537564007"
+        );
+        assert_eq!(parse("1234567", I128).to_string(), "1234567");
         assert_eq!(parse("0x32.32", F32).to_string(), "0x1.919000p5");
         assert_eq!(parse("0x64.64", F64).to_string(), "0x1.9190000000000p6");
         assert_eq!(parse("true", B1).to_string(), "true");
@@ -3909,5 +3737,24 @@ mod tests {
             parse("[0 1 2 3]", I32X4).to_string(),
             "0x00000003000000020000000100000000"
         );
+    }
+
+    #[test]
+    fn parse_cold_blocks() {
+        let code = "function %test() {
+        block0 cold:
+            return
+        block1(v0: i32) cold:
+            return
+        block2(v1: i32):
+            return
+        }";
+
+        let mut parser = Parser::new(code);
+        let func = parser.parse_function().unwrap().0;
+        assert_eq!(func.layout.blocks().count(), 3);
+        assert!(func.layout.is_cold(Block::from_u32(0)));
+        assert!(func.layout.is_cold(Block::from_u32(1)));
+        assert!(!func.layout.is_cold(Block::from_u32(2)));
     }
 }

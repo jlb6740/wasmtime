@@ -16,74 +16,75 @@
         clippy::float_arithmetic,
         clippy::mut_mut,
         clippy::nonminimal_bool,
-        clippy::option_map_unwrap_or,
-        clippy::option_map_unwrap_or_else,
-        clippy::print_stdout,
+        clippy::map_unwrap_or,
+        clippy::clippy::print_stdout,
         clippy::unicode_not_nfc,
         clippy::use_self
     )
 )]
 
 mod address_map;
+mod builtin;
 mod compilation;
-mod data_structures;
-mod func_environ;
 mod module;
 mod module_environ;
+pub mod obj;
+mod stack_map;
+mod trap_encoding;
 mod tunables;
 mod vmoffsets;
 
-mod cache;
-
-pub mod cranelift;
-#[cfg(feature = "lightbeam")]
-pub mod lightbeam;
-
-pub use crate::address_map::{
-    FunctionAddressMap, InstructionAddressMap, ModuleAddressMap, ModuleMemoryOffset,
-    ModuleVmctxInfo, ValueLabelsRanges,
-};
-pub use crate::cache::create_new_config as cache_create_new_config;
-pub use crate::cache::CacheConfig;
-pub use crate::compilation::{
-    Compilation, CompileError, CompiledFunction, Compiler, Relocation, RelocationTarget,
-    Relocations, StackMapInformation, StackMaps, TrapInformation, Traps,
-};
-pub use crate::cranelift::Cranelift;
-pub use crate::data_structures::*;
-pub use crate::func_environ::BuiltinFunctionIndex;
-#[cfg(feature = "lightbeam")]
-pub use crate::lightbeam::Lightbeam;
-pub use crate::module::{
-    EntityIndex, MemoryPlan, MemoryStyle, Module, ModuleLocal, TableElements, TablePlan, TableStyle,
-};
-pub use crate::module_environ::{
-    translate_signature, DataInitializer, DataInitializerLocation, FunctionBodyData,
-    ModuleEnvironment, ModuleTranslation,
-};
+pub use crate::address_map::*;
+pub use crate::builtin::*;
+pub use crate::compilation::*;
+pub use crate::module::*;
+pub use crate::module_environ::*;
+pub use crate::stack_map::StackMap;
+pub use crate::trap_encoding::*;
 pub use crate::tunables::Tunables;
-pub use crate::vmoffsets::{TargetSharedSignatureIndex, VMOffsets, INTERRUPTED};
+pub use crate::vmoffsets::*;
+pub use object;
+
+// Reexport all of these type-level since they're quite commonly used and it's
+// much easier to refer to everything through one crate rather than importing
+// one of three and making sure you're using the right one.
+pub use cranelift_entity::*;
+pub use wasmtime_types::*;
 
 /// WebAssembly page sizes are defined to be 64KiB.
 pub const WASM_PAGE_SIZE: u32 = 0x10000;
 
-/// The number of pages we can have before we run out of byte index space.
-pub const WASM_MAX_PAGES: u32 = 0x10000;
+/// The number of pages (for 32-bit modules) we can have before we run out of
+/// byte index space.
+pub const WASM32_MAX_PAGES: u64 = 1 << 16;
+/// The number of pages (for 64-bit modules) we can have before we run out of
+/// byte index space.
+pub const WASM64_MAX_PAGES: u64 = 1 << 48;
 
 /// Version number of this crate.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub(crate) fn reference_type(
-    wasm_ty: cranelift_wasm::WasmType,
-    pointer_type: ir::Type,
-) -> ir::Type {
-    match wasm_ty {
-        cranelift_wasm::WasmType::FuncRef => pointer_type,
-        cranelift_wasm::WasmType::ExternRef => match pointer_type {
-            ir::types::I32 => ir::types::R32,
-            ir::types::I64 => ir::types::R64,
-            _ => panic!("unsupported pointer type"),
-        },
-        _ => panic!("unsupported Wasm reference type"),
-    }
+/// Iterates through all `LibCall` members and all runtime exported functions.
+#[macro_export]
+macro_rules! for_each_libcall {
+    ($op:ident) => {
+        $op![
+            (UdivI64, wasmtime_i64_udiv),
+            (UdivI64, wasmtime_i64_udiv),
+            (SdivI64, wasmtime_i64_sdiv),
+            (UremI64, wasmtime_i64_urem),
+            (SremI64, wasmtime_i64_srem),
+            (IshlI64, wasmtime_i64_ishl),
+            (UshrI64, wasmtime_i64_ushr),
+            (SshrI64, wasmtime_i64_sshr),
+            (CeilF32, wasmtime_f32_ceil),
+            (FloorF32, wasmtime_f32_floor),
+            (TruncF32, wasmtime_f32_trunc),
+            (NearestF32, wasmtime_f32_nearest),
+            (CeilF64, wasmtime_f64_ceil),
+            (FloorF64, wasmtime_f64_floor),
+            (TruncF64, wasmtime_f64_trunc),
+            (NearestF64, wasmtime_f64_nearest)
+        ];
+    };
 }

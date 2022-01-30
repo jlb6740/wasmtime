@@ -139,17 +139,17 @@ check: exited with status
     any(target_os = "linux", target_os = "macos"),
     target_pointer_width = "64"
 ))]
-pub fn test_debug_dwarf_ptr() -> Result<()> {
+pub fn test_debug_dwarf_ref() -> Result<()> {
     let output = lldb_with_script(
         &[
             "-g",
             "--opt-level",
             "0",
-            "tests/all/debug/testsuite/reverse-str.wasm",
+            "tests/all/debug/testsuite/fraction-norm.wasm",
         ],
-        r#"b reverse-str.c:9
+        r#"b fraction-norm.cc:26
 r
-p __vmctx->set(),&*s
+p __vmctx->set(),n->denominator
 c"#,
     )?;
 
@@ -159,8 +159,8 @@ c"#,
 check: Breakpoint 1: no locations (pending)
 check: stop reason = breakpoint 1.1
 check: frame #0
-sameln: reverse(s=(__ptr =
-check: "Hello, world."
+sameln: norm(n=(__ptr =
+check: = 27
 check: resuming
 "#,
     )?;

@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 use std::cell::UnsafeCell;
 use std::marker;
-use wiggle::{BorrowChecker, GuestMemory};
+use wiggle::{borrow::BorrowChecker, BorrowHandle, GuestMemory, Region};
 
 #[derive(Debug, Clone)]
 pub struct MemAreas(Vec<MemArea>);
@@ -47,6 +47,9 @@ struct HostBuffer {
     cell: UnsafeCell<[u8; 4096]>,
 }
 
+unsafe impl Send for HostBuffer {}
+unsafe impl Sync for HostBuffer {}
+
 pub struct HostMemory {
     buffer: HostBuffer,
     bc: BorrowChecker,
@@ -57,7 +60,7 @@ impl HostMemory {
             buffer: HostBuffer {
                 cell: UnsafeCell::new([0; 4096]),
             },
-            bc: unsafe { BorrowChecker::new() },
+            bc: BorrowChecker::new(),
         }
     }
 
@@ -99,10 +102,11 @@ impl HostMemory {
         out
     }
 
-    pub fn byte_slice_strat(size: u32, exclude: &MemAreas) -> BoxedStrategy<MemArea> {
+    pub fn byte_slice_strat(size: u32, align: u32, exclude: &MemAreas) -> BoxedStrategy<MemArea> {
         let available: Vec<MemArea> = Self::invert(exclude)
             .iter()
             .flat_map(|a| a.inside(size))
+            .filter(|a| a.ptr % align == 0)
             .collect();
 
         Just(available)
@@ -119,8 +123,26 @@ unsafe impl GuestMemory for HostMemory {
             ((*ptr).as_mut_ptr(), (*ptr).len() as u32)
         }
     }
-    fn borrow_checker(&self) -> &BorrowChecker {
-        &self.bc
+    fn has_outstanding_borrows(&self) -> bool {
+        self.bc.has_outstanding_borrows()
+    }
+    fn is_shared_borrowed(&self, r: Region) -> bool {
+        self.bc.is_shared_borrowed(r)
+    }
+    fn is_mut_borrowed(&self, r: Region) -> bool {
+        self.bc.is_mut_borrowed(r)
+    }
+    fn mut_borrow(&self, r: Region) -> Result<BorrowHandle, GuestError> {
+        self.bc.mut_borrow(r)
+    }
+    fn shared_borrow(&self, r: Region) -> Result<BorrowHandle, GuestError> {
+        self.bc.shared_borrow(r)
+    }
+    fn shared_unborrow(&self, h: BorrowHandle) {
+        self.bc.shared_unborrow(h)
+    }
+    fn mut_unborrow(&self, h: BorrowHandle) {
+        self.bc.mut_unborrow(h)
     }
 }
 
@@ -244,18 +266,18 @@ mod test {
         s2: u32,
         s3: u32,
     ) -> BoxedStrategy<(MemArea, MemArea, MemArea)> {
-        HostMemory::byte_slice_strat(s1, &MemAreas::new())
+        HostMemory::byte_slice_strat(s1, 1, &MemAreas::new())
             .prop_flat_map(move |a1| {
                 (
                     Just(a1),
-                    HostMemory::byte_slice_strat(s2, &MemAreas::from(&[a1])),
+                    HostMemory::byte_slice_strat(s2, 1, &MemAreas::from(&[a1])),
                 )
             })
             .prop_flat_map(move |(a1, a2)| {
                 (
                     Just(a1),
                     Just(a2),
-                    HostMemory::byte_slice_strat(s3, &MemAreas::from(&[a1, a2])),
+                    HostMemory::byte_slice_strat(s3, 1, &MemAreas::from(&[a1, a2])),
                 )
             })
             .boxed()
@@ -326,17 +348,10 @@ impl<'a> WasiCtx<'a> {
 // with these errors. We just push them to vecs.
 #[macro_export]
 macro_rules! impl_errno {
-    ( $errno:ty, $convert:path ) => {
+    ( $errno:ty ) => {
         impl wiggle::GuestErrorType for $errno {
             fn success() -> $errno {
                 <$errno>::Ok
-            }
-        }
-        impl<'a> $convert for WasiCtx<'a> {
-            fn into_errno(&self, e: wiggle::GuestError) -> $errno {
-                eprintln!("GuestError: {:?}", e);
-                self.guest_errors.borrow_mut().push(e);
-                <$errno>::InvalidArg
             }
         }
     };

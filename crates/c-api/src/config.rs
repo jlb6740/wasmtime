@@ -1,3 +1,7 @@
+// Don't worry about unused imports if we're frobbing features, only worry about
+// them with the default set of features enabled.
+#![cfg_attr(not(feature = "cache"), allow(unused_imports))]
+
 use crate::{handle_result, wasmtime_error_t};
 use std::ffi::CStr;
 use std::os::raw::c_char;
@@ -16,7 +20,6 @@ wasmtime_c_api_macros::declare_own!(wasm_config_t);
 pub enum wasmtime_strategy_t {
     WASMTIME_STRATEGY_AUTO,
     WASMTIME_STRATEGY_CRANELIFT,
-    WASMTIME_STRATEGY_LIGHTBEAM,
 }
 
 #[repr(u8)]
@@ -52,8 +55,13 @@ pub extern "C" fn wasmtime_config_interruptable_set(c: &mut wasm_config_t, enabl
 }
 
 #[no_mangle]
-pub extern "C" fn wasmtime_config_max_wasm_stack_set(c: &mut wasm_config_t, size: usize) {
-    c.config.max_wasm_stack(size);
+pub extern "C" fn wasmtime_config_consume_fuel_set(c: &mut wasm_config_t, enable: bool) {
+    c.config.consume_fuel(enable);
+}
+
+#[no_mangle]
+pub extern "C" fn wasmtime_config_max_wasm_stack_set(c: &mut wasm_config_t, size: usize) -> bool {
+    c.config.max_wasm_stack(size).is_ok()
 }
 
 #[no_mangle]
@@ -82,6 +90,21 @@ pub extern "C" fn wasmtime_config_wasm_multi_value_set(c: &mut wasm_config_t, en
 }
 
 #[no_mangle]
+pub extern "C" fn wasmtime_config_wasm_multi_memory_set(c: &mut wasm_config_t, enable: bool) {
+    c.config.wasm_multi_memory(enable);
+}
+
+#[no_mangle]
+pub extern "C" fn wasmtime_config_wasm_module_linking_set(c: &mut wasm_config_t, enable: bool) {
+    c.config.wasm_module_linking(enable);
+}
+
+#[no_mangle]
+pub extern "C" fn wasmtime_config_wasm_memory64_set(c: &mut wasm_config_t, enable: bool) {
+    c.config.wasm_memory64(enable);
+}
+
+#[no_mangle]
 pub extern "C" fn wasmtime_config_strategy_set(
     c: &mut wasm_config_t,
     strategy: wasmtime_strategy_t,
@@ -90,7 +113,6 @@ pub extern "C" fn wasmtime_config_strategy_set(
     let result = c.config.strategy(match strategy {
         WASMTIME_STRATEGY_AUTO => Strategy::Auto,
         WASMTIME_STRATEGY_CRANELIFT => Strategy::Cranelift,
-        WASMTIME_STRATEGY_LIGHTBEAM => Strategy::Lightbeam,
     });
     handle_result(result, |_cfg| {})
 }
@@ -130,6 +152,7 @@ pub extern "C" fn wasmtime_config_profiler_set(
 }
 
 #[no_mangle]
+#[cfg(feature = "cache")]
 pub unsafe extern "C" fn wasmtime_config_cache_config_load(
     c: &mut wasm_config_t,
     filename: *const c_char,

@@ -6,6 +6,7 @@
 use crate::cursor::{Cursor, FuncCursor};
 use crate::flowgraph::ControlFlowGraph;
 use crate::ir::condcodes::IntCC;
+use crate::ir::immediates::Uimm32;
 use crate::ir::{self, InstBuilder};
 use crate::isa::TargetIsa;
 
@@ -15,31 +16,26 @@ pub fn expand_heap_addr(
     func: &mut ir::Function,
     cfg: &mut ControlFlowGraph,
     isa: &dyn TargetIsa,
+    heap: ir::Heap,
+    offset: ir::Value,
+    access_size: Uimm32,
 ) {
-    // Unpack the instruction.
-    let (heap, offset, access_size) = match func.dfg[inst] {
-        ir::InstructionData::HeapAddr {
-            opcode,
-            heap,
-            arg,
-            imm,
-        } => {
-            debug_assert_eq!(opcode, ir::Opcode::HeapAddr);
-            (heap, arg, imm.into())
-        }
-        _ => panic!("Wanted heap_addr: {}", func.dfg.display_inst(inst, None)),
-    };
-
     match func.heaps[heap].style {
-        ir::HeapStyle::Dynamic { bound_gv } => {
-            dynamic_addr(isa, inst, heap, offset, access_size, bound_gv, func)
-        }
+        ir::HeapStyle::Dynamic { bound_gv } => dynamic_addr(
+            isa,
+            inst,
+            heap,
+            offset,
+            u64::from(access_size),
+            bound_gv,
+            func,
+        ),
         ir::HeapStyle::Static { bound } => static_addr(
             isa,
             inst,
             heap,
             offset,
-            access_size,
+            u64::from(access_size),
             bound.into(),
             func,
             cfg,
@@ -53,48 +49,57 @@ fn dynamic_addr(
     inst: ir::Inst,
     heap: ir::Heap,
     offset: ir::Value,
-    access_size: u32,
+    access_size: u64,
     bound_gv: ir::GlobalValue,
     func: &mut ir::Function,
 ) {
-    let access_size = u64::from(access_size);
     let offset_ty = func.dfg.value_type(offset);
     let addr_ty = func.dfg.value_type(func.dfg.first_result(inst));
     let min_size = func.heaps[heap].min_size.into();
     let mut pos = FuncCursor::new(func).at_inst(inst);
     pos.use_srcloc(inst);
 
+    let offset = cast_offset_to_pointer_ty(offset, offset_ty, addr_ty, &mut pos);
+
     // Start with the bounds check. Trap if `offset + access_size > bound`.
-    let bound = pos.ins().global_value(offset_ty, bound_gv);
-    let oob;
-    if access_size == 1 {
+    let bound = pos.ins().global_value(addr_ty, bound_gv);
+    let (cc, lhs, bound) = if access_size == 1 {
         // `offset > bound - 1` is the same as `offset >= bound`.
-        oob = pos
-            .ins()
-            .icmp(IntCC::UnsignedGreaterThanOrEqual, offset, bound);
+        (IntCC::UnsignedGreaterThanOrEqual, offset, bound)
     } else if access_size <= min_size {
         // We know that bound >= min_size, so here we can compare `offset > bound - access_size`
         // without wrapping.
         let adj_bound = pos.ins().iadd_imm(bound, -(access_size as i64));
-        oob = pos
-            .ins()
-            .icmp(IntCC::UnsignedGreaterThan, offset, adj_bound);
+        (IntCC::UnsignedGreaterThan, offset, adj_bound)
     } else {
         // We need an overflow check for the adjusted offset.
-        let access_size_val = pos.ins().iconst(offset_ty, access_size as i64);
+        let access_size_val = pos.ins().iconst(addr_ty, access_size as i64);
         let (adj_offset, overflow) = pos.ins().iadd_ifcout(offset, access_size_val);
         pos.ins().trapif(
             isa.unsigned_add_overflow_condition(),
             overflow,
             ir::TrapCode::HeapOutOfBounds,
         );
-        oob = pos
-            .ins()
-            .icmp(IntCC::UnsignedGreaterThan, adj_offset, bound);
-    }
+        (IntCC::UnsignedGreaterThan, adj_offset, bound)
+    };
+    let oob = pos.ins().icmp(cc, lhs, bound);
     pos.ins().trapnz(oob, ir::TrapCode::HeapOutOfBounds);
 
-    compute_addr(isa, inst, heap, addr_ty, offset, offset_ty, pos.func);
+    let spectre_oob_comparison = if isa.flags().enable_heap_access_spectre_mitigation() {
+        Some((cc, lhs, bound))
+    } else {
+        None
+    };
+
+    compute_addr(
+        isa,
+        inst,
+        heap,
+        addr_ty,
+        offset,
+        pos.func,
+        spectre_oob_comparison,
+    );
 }
 
 /// Expand a `heap_addr` for a static heap.
@@ -102,13 +107,12 @@ fn static_addr(
     isa: &dyn TargetIsa,
     inst: ir::Inst,
     heap: ir::Heap,
-    offset: ir::Value,
-    access_size: u32,
+    mut offset: ir::Value,
+    access_size: u64,
     bound: u64,
     func: &mut ir::Function,
     cfg: &mut ControlFlowGraph,
 ) {
-    let access_size = u64::from(access_size);
     let offset_ty = func.dfg.value_type(offset);
     let addr_ty = func.dfg.value_type(func.dfg.first_result(inst));
     let mut pos = FuncCursor::new(func).at_inst(inst);
@@ -146,20 +150,73 @@ fn static_addr(
     // With that we have an optimization here where with 32-bit offsets and
     // `bound - access_size >= 4GB` we can omit a bounds check.
     let limit = bound - access_size;
+    let mut spectre_oob_comparison = None;
+    offset = cast_offset_to_pointer_ty(offset, offset_ty, addr_ty, &mut pos);
     if offset_ty != ir::types::I32 || limit < 0xffff_ffff {
-        let oob = if limit & 1 == 1 {
-            // Prefer testing `offset >= limit - 1` when limit is odd because an even number is
-            // likely to be a convenient constant on ARM and other RISC architectures.
-            pos.ins()
-                .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, offset, limit as i64 - 1)
+        // Here we want to test the condition `offset > limit` and if that's
+        // true then this is an out-of-bounds access and needs to trap. For ARM
+        // and other RISC architectures it's easier to test against an immediate
+        // that's even instead of odd, so if `limit` is odd then we instead test
+        // for `offset >= limit + 1`.
+        //
+        // The thinking behind this is that:
+        //
+        //      A >= B + 1  =>  A - 1 >= B  =>  A > B
+        //
+        // where the last step here is true because A/B are integers, which
+        // should mean that `A >= B + 1` is an equivalent check for `A > B`
+        let (cc, lhs, limit_imm) = if limit & 1 == 1 {
+            let limit = limit as i64 + 1;
+            (IntCC::UnsignedGreaterThanOrEqual, offset, limit)
         } else {
-            pos.ins()
-                .icmp_imm(IntCC::UnsignedGreaterThan, offset, limit as i64)
+            let limit = limit as i64;
+            (IntCC::UnsignedGreaterThan, offset, limit)
         };
+        let oob = pos.ins().icmp_imm(cc, lhs, limit_imm);
         pos.ins().trapnz(oob, ir::TrapCode::HeapOutOfBounds);
+        if isa.flags().enable_heap_access_spectre_mitigation() {
+            let limit = pos.ins().iconst(addr_ty, limit_imm);
+            spectre_oob_comparison = Some((cc, lhs, limit));
+        }
     }
 
-    compute_addr(isa, inst, heap, addr_ty, offset, offset_ty, pos.func);
+    compute_addr(
+        isa,
+        inst,
+        heap,
+        addr_ty,
+        offset,
+        pos.func,
+        spectre_oob_comparison,
+    );
+}
+
+fn cast_offset_to_pointer_ty(
+    offset: ir::Value,
+    offset_ty: ir::Type,
+    addr_ty: ir::Type,
+    pos: &mut FuncCursor,
+) -> ir::Value {
+    if offset_ty == addr_ty {
+        return offset;
+    }
+    // Note that using 64-bit heaps on a 32-bit host is not currently supported,
+    // would require at least a bounds check here to ensure that the truncation
+    // from 64-to-32 bits doesn't lose any upper bits. For now though we're
+    // mostly interested in the 32-bit-heaps-on-64-bit-hosts cast.
+    assert!(offset_ty.bits() < addr_ty.bits());
+
+    // Convert `offset` to `addr_ty`.
+    let extended_offset = pos.ins().uextend(addr_ty, offset);
+
+    // Add debug value-label alias so that debuginfo can name the extended
+    // value as the address
+    let loc = pos.srcloc();
+    pos.func
+        .dfg
+        .add_value_label_alias(extended_offset, loc, offset);
+
+    extended_offset
 }
 
 /// Emit code for the base address computation of a `heap_addr` instruction.
@@ -168,27 +225,17 @@ fn compute_addr(
     inst: ir::Inst,
     heap: ir::Heap,
     addr_ty: ir::Type,
-    mut offset: ir::Value,
-    offset_ty: ir::Type,
+    offset: ir::Value,
     func: &mut ir::Function,
+    // If we are performing Spectre mitigation with conditional selects, the
+    // values to compare and the condition code that indicates an out-of bounds
+    // condition; on this condition, the conditional move will choose a
+    // speculatively safe address (a zero / null pointer) instead.
+    spectre_oob_comparison: Option<(IntCC, ir::Value, ir::Value)>,
 ) {
+    debug_assert_eq!(func.dfg.value_type(offset), addr_ty);
     let mut pos = FuncCursor::new(func).at_inst(inst);
     pos.use_srcloc(inst);
-
-    // Convert `offset` to `addr_ty`.
-    if offset_ty != addr_ty {
-        let labels_value = offset;
-        offset = pos.ins().uextend(addr_ty, offset);
-        if let Some(values_labels) = pos.func.dfg.values_labels.as_mut() {
-            values_labels.insert(
-                offset,
-                ir::ValueLabelAssignments::Alias {
-                    from: pos.func.srclocs[inst],
-                    value: labels_value,
-                },
-            );
-        }
-    }
 
     // Add the heap base address base
     let base = if isa.flags().enable_pinned_reg() && isa.flags().use_pinned_reg_as_heap_base() {
@@ -198,5 +245,15 @@ fn compute_addr(
         pos.ins().global_value(addr_ty, base_gv)
     };
 
-    pos.func.dfg.replace(inst).iadd(base, offset);
+    if let Some((cc, a, b)) = spectre_oob_comparison {
+        let final_addr = pos.ins().iadd(base, offset);
+        let zero = pos.ins().iconst(addr_ty, 0);
+        let flags = pos.ins().ifcmp(a, b);
+        pos.func
+            .dfg
+            .replace(inst)
+            .selectif_spectre_guard(addr_ty, cc, flags, zero, final_addr);
+    } else {
+        pos.func.dfg.replace(inst).iadd(base, offset);
+    }
 }

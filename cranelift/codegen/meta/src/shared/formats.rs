@@ -3,27 +3,24 @@ use crate::shared::{entities::EntityRefs, immediates::Immediates};
 use std::rc::Rc;
 
 pub(crate) struct Formats {
+    pub(crate) atomic_cas: Rc<InstructionFormat>,
+    pub(crate) atomic_rmw: Rc<InstructionFormat>,
     pub(crate) binary: Rc<InstructionFormat>,
+    pub(crate) binary_imm8: Rc<InstructionFormat>,
     pub(crate) binary_imm64: Rc<InstructionFormat>,
     pub(crate) branch: Rc<InstructionFormat>,
     pub(crate) branch_float: Rc<InstructionFormat>,
     pub(crate) branch_icmp: Rc<InstructionFormat>,
     pub(crate) branch_int: Rc<InstructionFormat>,
     pub(crate) branch_table: Rc<InstructionFormat>,
-    pub(crate) branch_table_base: Rc<InstructionFormat>,
-    pub(crate) branch_table_entry: Rc<InstructionFormat>,
     pub(crate) call: Rc<InstructionFormat>,
     pub(crate) call_indirect: Rc<InstructionFormat>,
     pub(crate) cond_trap: Rc<InstructionFormat>,
-    pub(crate) copy_special: Rc<InstructionFormat>,
-    pub(crate) copy_to_ssa: Rc<InstructionFormat>,
-    pub(crate) binary_imm8: Rc<InstructionFormat>,
     pub(crate) float_compare: Rc<InstructionFormat>,
     pub(crate) float_cond: Rc<InstructionFormat>,
     pub(crate) float_cond_trap: Rc<InstructionFormat>,
     pub(crate) func_addr: Rc<InstructionFormat>,
     pub(crate) heap_addr: Rc<InstructionFormat>,
-    pub(crate) indirect_jump: Rc<InstructionFormat>,
     pub(crate) int_compare: Rc<InstructionFormat>,
     pub(crate) int_compare_imm: Rc<InstructionFormat>,
     pub(crate) int_cond: Rc<InstructionFormat>,
@@ -32,16 +29,15 @@ pub(crate) struct Formats {
     pub(crate) jump: Rc<InstructionFormat>,
     pub(crate) load: Rc<InstructionFormat>,
     pub(crate) load_complex: Rc<InstructionFormat>,
+    pub(crate) load_no_offset: Rc<InstructionFormat>,
     pub(crate) multiary: Rc<InstructionFormat>,
     pub(crate) nullary: Rc<InstructionFormat>,
-    pub(crate) reg_fill: Rc<InstructionFormat>,
-    pub(crate) reg_move: Rc<InstructionFormat>,
-    pub(crate) reg_spill: Rc<InstructionFormat>,
     pub(crate) shuffle: Rc<InstructionFormat>,
     pub(crate) stack_load: Rc<InstructionFormat>,
     pub(crate) stack_store: Rc<InstructionFormat>,
     pub(crate) store: Rc<InstructionFormat>,
     pub(crate) store_complex: Rc<InstructionFormat>,
+    pub(crate) store_no_offset: Rc<InstructionFormat>,
     pub(crate) table_addr: Rc<InstructionFormat>,
     pub(crate) ternary: Rc<InstructionFormat>,
     pub(crate) ternary_imm8: Rc<InstructionFormat>,
@@ -105,7 +101,7 @@ impl Formats {
             shuffle: Builder::new("Shuffle")
                 .value()
                 .value()
-                .imm_with_name("mask", &imm.uimm128)
+                .imm(&imm.uimm128)
                 .build(),
 
             int_compare: Builder::new("IntCompare")
@@ -173,22 +169,6 @@ impl Formats {
                 .imm(&entities.jump_table)
                 .build(),
 
-            branch_table_entry: Builder::new("BranchTableEntry")
-                .value()
-                .value()
-                .imm(&imm.uimm8)
-                .imm(&entities.jump_table)
-                .build(),
-
-            branch_table_base: Builder::new("BranchTableBase")
-                .imm(&entities.jump_table)
-                .build(),
-
-            indirect_jump: Builder::new("IndirectJump")
-                .value()
-                .imm(&entities.jump_table)
-                .build(),
-
             call: Builder::new("Call")
                 .imm(&entities.func_ref)
                 .varargs()
@@ -202,6 +182,21 @@ impl Formats {
 
             func_addr: Builder::new("FuncAddr").imm(&entities.func_ref).build(),
 
+            atomic_rmw: Builder::new("AtomicRmw")
+                .imm(&imm.memflags)
+                .imm(&imm.atomic_rmw_op)
+                .value()
+                .value()
+                .build(),
+
+            atomic_cas: Builder::new("AtomicCas")
+                .imm(&imm.memflags)
+                .value()
+                .value()
+                .value()
+                .typevar_operand(2)
+                .build(),
+
             load: Builder::new("Load")
                 .imm(&imm.memflags)
                 .value()
@@ -212,6 +207,11 @@ impl Formats {
                 .imm(&imm.memflags)
                 .varargs()
                 .imm(&imm.offset32)
+                .build(),
+
+            load_no_offset: Builder::new("LoadNoOffset")
+                .imm(&imm.memflags)
+                .value()
                 .build(),
 
             store: Builder::new("Store")
@@ -226,6 +226,12 @@ impl Formats {
                 .value()
                 .varargs()
                 .imm(&imm.offset32)
+                .build(),
+
+            store_no_offset: Builder::new("StoreNoOffset")
+                .imm(&imm.memflags)
+                .value()
+                .value()
                 .build(),
 
             stack_load: Builder::new("StackLoad")
@@ -251,33 +257,6 @@ impl Formats {
                 .imm(&entities.table)
                 .value()
                 .imm(&imm.offset32)
-                .build(),
-
-            reg_move: Builder::new("RegMove")
-                .value()
-                .imm_with_name("src", &imm.regunit)
-                .imm_with_name("dst", &imm.regunit)
-                .build(),
-
-            copy_special: Builder::new("CopySpecial")
-                .imm_with_name("src", &imm.regunit)
-                .imm_with_name("dst", &imm.regunit)
-                .build(),
-
-            copy_to_ssa: Builder::new("CopyToSsa")
-                .imm_with_name("src", &imm.regunit)
-                .build(),
-
-            reg_spill: Builder::new("RegSpill")
-                .value()
-                .imm_with_name("src", &imm.regunit)
-                .imm_with_name("dst", &entities.stack_slot)
-                .build(),
-
-            reg_fill: Builder::new("RegFill")
-                .value()
-                .imm_with_name("src", &entities.stack_slot)
-                .imm_with_name("dst", &imm.regunit)
                 .build(),
 
             trap: Builder::new("Trap").imm(&imm.trapcode).build(),

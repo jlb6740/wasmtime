@@ -1,6 +1,4 @@
 use anyhow::Result;
-use std::cell::RefCell;
-use std::rc::Rc;
 use wasmtime::*;
 
 #[test]
@@ -16,43 +14,38 @@ fn test_import_calling_export() {
     )
     "#;
 
-    let store = Store::default();
+    let mut store = Store::<Option<Func>>::default();
     let module = Module::new(store.engine(), WAT).expect("failed to create module");
 
-    let other = Rc::new(RefCell::new(None::<Func>));
-    let other2 = Rc::downgrade(&other);
-
     let callback_func = Func::new(
-        &store,
-        FuncType::new(Box::new([]), Box::new([])),
-        move |_, _, _| {
-            other2
-                .upgrade()
+        &mut store,
+        FuncType::new(None, None),
+        move |mut caller, _, _| {
+            caller
+                .data()
                 .unwrap()
-                .borrow()
-                .as_ref()
-                .expect("expected a function ref")
-                .call(&[])
+                .call(&mut caller, &[], &mut [])
                 .expect("expected function not to trap");
             Ok(())
         },
     );
 
     let imports = vec![callback_func.into()];
-    let instance =
-        Instance::new(&store, &module, imports.as_slice()).expect("failed to instantiate module");
+    let instance = Instance::new(&mut store, &module, imports.as_slice())
+        .expect("failed to instantiate module");
 
     let run_func = instance
-        .get_func("run")
+        .get_func(&mut store, "run")
         .expect("expected a run func in the module");
 
-    *other.borrow_mut() = Some(
-        instance
-            .get_func("other")
-            .expect("expected an other func in the module"),
-    );
+    let other_func = instance
+        .get_func(&mut store, "other")
+        .expect("expected an other func in the module");
+    *store.data_mut() = Some(other_func);
 
-    run_func.call(&[]).expect("expected function not to trap");
+    run_func
+        .call(&mut store, &[], &mut [])
+        .expect("expected function not to trap");
 }
 
 #[test]
@@ -66,12 +59,12 @@ fn test_returns_incorrect_type() -> Result<()> {
     )
     "#;
 
-    let store = Store::default();
+    let mut store = Store::<()>::default();
     let module = Module::new(store.engine(), WAT)?;
 
     let callback_func = Func::new(
-        &store,
-        FuncType::new(Box::new([]), Box::new([ValType::I32])),
+        &mut store,
+        FuncType::new(None, Some(ValType::I32)),
         |_, _, results| {
             // Evil! Returns I64 here instead of promised in the signature I32.
             results[0] = Val::I64(228);
@@ -80,14 +73,15 @@ fn test_returns_incorrect_type() -> Result<()> {
     );
 
     let imports = vec![callback_func.into()];
-    let instance = Instance::new(&store, &module, imports.as_slice())?;
+    let instance = Instance::new(&mut store, &module, imports.as_slice())?;
 
     let run_func = instance
-        .get_func("run")
+        .get_func(&mut store, "run")
         .expect("expected a run func in the module");
 
+    let mut result = [Val::I32(0)];
     let trap = run_func
-        .call(&[])
+        .call(&mut store, &[], &mut result)
         .expect_err("the execution should fail")
         .downcast::<Trap>()?;
     assert!(trap

@@ -123,11 +123,8 @@ block0(v90: i32, v91: f32):
 
 ; Stack slot references
 function %stack() {
-    ss10 = spill_slot 8
+    ss10 = explicit_slot 8
     ss2 = explicit_slot 4
-    ss3 = incoming_arg 4, offset 8
-    ss4 = outgoing_arg 4
-    ss5 = emergency_slot 4
 
 block0:
     v1 = stack_load.i32 ss10
@@ -137,10 +134,7 @@ block0:
 }
 ; sameln: function %stack() fast {
 ; check:     ss2 = explicit_slot 4
-; check:     ss3 = incoming_arg 4, offset 8
-; check:     ss4 = outgoing_arg 4
-; check:     ss5 = emergency_slot 4
-; check:     ss10 = spill_slot 8
+; check:     ss10 = explicit_slot 8
 
 ; check: block0:
 ; nextln: v1 = stack_load.i32 ss10
@@ -182,42 +176,6 @@ block0(v1: i32):
 ; nextln:     store notrap aligned v3, v1-12
 ; nextln:     store_complex v3, v1+v2
 ; nextln:     store_complex v3, v1+v2+1
-
-; Register diversions.
-; This test file has no ISA, so we can unly use register unit numbers.
-function %diversion(i32) {
-    ss0 = spill_slot 4
-
-block0(v1: i32):
-    regmove v1, %10 -> %20
-    regmove v1, %20 -> %10
-    regspill v1, %10 -> ss0
-    regfill v1, ss0 -> %10
-    return
-}
-; sameln: function %diversion(i32) fast {
-; nextln:     ss0 = spill_slot 4
-; check: block0(v1: i32):
-; nextln:     regmove v1, %10 -> %20
-; nextln:     regmove v1, %20 -> %10
-; nextln:     regspill v1, %10 -> ss0
-; nextln:     regfill v1, ss0 -> %10
-; nextln:     return
-; nextln: }
-
-; Register copies.
-function %copy_special() {
-block0:
-    copy_special %10 -> %20
-    copy_special %20 -> %10
-    return
-}
-; sameln: function %copy_special() fast {
-; nextln: block0:
-; nextln:     copy_special %10 -> %20
-; nextln:     copy_special %20 -> %10
-; nextln:     return
-; nextln: }
 
 function %cond_traps(i32) {
 block0(v0: i32):

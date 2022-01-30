@@ -1,315 +1,208 @@
-// WebAssembly C API extension for Wasmtime
+/**
+ * \mainpage Wasmtime C API
+ *
+ * This documentation is an overview and API reference for the C API of
+ * Wasmtime. The C API is spread between three different header files:
+ *
+ * * \ref wasmtime.h
+ * * \ref wasi.h
+ * * \ref wasm.h
+ *
+ * The \ref wasmtime.h header file includes all the other header files and is
+ * the main header file you'll likely be using. The \ref wasm.h header file
+ * comes directly from the
+ * [WebAssembly/wasm-c-api](https://github.com/WebAssembly/wasm-c-api)
+ * repository, and at this time the upstream header file does not have
+ * documentation so Wasmtime provides documentation here. It should be noted
+ * some semantics may be Wasmtime-specific and may not be portable to other
+ * engines.
+ *
+ * ## Installing the C API
+ *
+ * To install the C API from precompiled binaries you can download the
+ * appropriate binary from the [releases page of
+ * Wasmtime](https://github.com/bytecodealliance/wasmtime/releases). Artifacts
+ * for the C API all end in "-c-api" for the filename.
+ *
+ * Each archive contains an `include` directory with necessary headers, as well
+ * as a `lib` directory with both a static archive and a dynamic library of
+ * Wasmtime. You can link to either of them as you see fit.
+ *
+ * ## Linking against the C API
+ *
+ * You'll want to arrange the `include` directory of the C API to be in your
+ * compiler's header path (e.g. the `-I` flag). If you're compiling for Windows
+ * and you're using the static library then you'll also need to pass
+ * `-DWASM_API_EXTERN=` and `-DWASI_API_EXTERN=` to disable dllimport.
+ *
+ * Your final artifact can then be linked with `-lwasmtime`. If you're linking
+ * against the static library you may need to pass other system libraries
+ * depending on your platform:
+ *
+ * * Linux - `-lpthread -ldl -lm`
+ * * macOS - no extra flags needed
+ * * Windows - `ws2_32.lib advapi32.lib userenv.lib ntdll.lib shell32.lib ole32.lib`
+ *
+ * ## Building from Source
+ *
+ * The C API is located in the
+ * [`crates/c-api`](https://github.com/bytecodealliance/wasmtime/tree/main/crates/c-api)
+ * directory of the [Wasmtime
+ * repository](https://github.com/bytecodealliance/wasmtime). To build from
+ * source you'll need a Rust compiler and a checkout of the `wasmtime` project.
+ * Afterwards you can execute:
+ *
+ * ```
+ * $ cargo build --release -p wasmtime-c-api
+ * ```
+ *
+ * This will place the final artifacts in `target/release`, with names depending
+ * on what platform you're compiling for.
+ *
+ * ## Other resources
+ *
+ * Some other handy resources you might find useful when exploring the C API
+ * documentation are:
+ *
+ * * [Rust `wasmtime` crate
+ *   documentation](https://bytecodealliance.github.io/wasmtime/api/wasmtime/) -
+ *   although this documentation is for Rust and not C, you'll find that many
+ *   functions mirror one another and there may be extra documentation in Rust
+ *   you find helpful. If you find yourself having to frequently do this,
+ *   though, please feel free to [file an
+ *   issue](https://github.com/bytecodealliance/wasmtime/issues/new).
+ *
+ * * [C embedding
+ *   examples](https://bytecodealliance.github.io/wasmtime/examples-c-embed.html)
+ *   are available online and are tested from the Wasmtime repository itself.
+ *
+ * * [Contribution documentation for
+ *   Wasmtime](https://bytecodealliance.github.io/wasmtime/contributing.html) in
+ *   case you're interested in helping out!
+ */
+
+/**
+ * \file wasmtime.h
+ *
+ * \brief Wasmtime's C API
+ *
+ * This file is the central inclusion point for Wasmtime's C API. There are a
+ * number of sub-header files but this file includes them all. The C API is
+ * based on \ref wasm.h but there are many Wasmtime-specific APIs which are
+ * tailored to Wasmtime's implementation.
+ *
+ * The #wasm_config_t and #wasm_engine_t types are used from \ref wasm.h.
+ * Additionally all type-level information (like #wasm_functype_t) is also
+ * used from \ref wasm.h. Otherwise, though, all wasm objects (like
+ * #wasmtime_store_t or #wasmtime_func_t) are used from this header file.
+ *
+ * ### Thread Safety
+ *
+ * The multithreading story of the C API very closely follows the
+ * multithreading story of the Rust API for Wasmtime. All objects are safe to
+ * send to other threads so long as user-specific data is also safe to send to
+ * other threads. Functions are safe to call from any thread but some functions
+ * cannot be called concurrently. For example, functions which correspond to
+ * `&T` in Rust can be called concurrently with any other methods that take
+ * `&T`. Functions that take `&mut T` in Rust, however, cannot be called
+ * concurrently with any other function (but can still be invoked on any
+ * thread).
+ *
+ * This generally equates to mutation of internal state. Functions which don't
+ * mutate anything, such as learning type information through
+ * #wasmtime_func_type, can be called concurrently. Functions which do require
+ * mutation, for example #wasmtime_func_call, cannot be called concurrently.
+ * This is conveyed in the C API with either `const wasmtime_context_t*`
+ * (concurrency is ok as it's read-only) or `wasmtime_context_t*` (concurrency
+ * is not ok, mutation may happen).
+ *
+ * When in doubt assume that functions cannot be called concurrently with
+ * aliasing objects.
+ *
+ * ### Aliasing
+ *
+ * The C API for Wasmtime is intended to be a relatively thin layer over the
+ * Rust API for Wasmtime. Rust has much more strict rules about aliasing than C
+ * does, and the Rust API for Wasmtime is designed around these rules to be
+ * used safely. These same rules must be upheld when using the C API of
+ * Wasmtime.
+ *
+ * The main consequence of this is that the #wasmtime_context_t pointer into
+ * the #wasmtime_store_t must be carefully used. Since the context is an
+ * internal pointer into the store it must be used carefully to ensure you're
+ * not doing something that Rust would otherwise forbid at compile time. A
+ * #wasmtime_context_t can only be used when you would otherwise have been
+ * provided access to it. For example in a host function created with
+ * #wasmtime_func_new you can use #wasmtime_context_t in the host function
+ * callback. This is because an argument, a #wasmtime_caller_t, provides access
+ * to #wasmtime_context_t. On the other hand a destructor passed to
+ * #wasmtime_externref_new, however, cannot use a #wasmtime_context_t because
+ * it was not provided access to one. Doing so may lead to memory unsafety.
+ *
+ * ### Stores
+ *
+ * A foundational construct in this API is the #wasmtime_store_t. A store is a
+ * collection of host-provided objects and instantiated wasm modules. Stores are
+ * often treated as a "single unit" and items within a store are all allowed to
+ * reference one another. References across stores cannot currently be created.
+ * For example you cannot pass a function from one store into another store.
+ *
+ * A store is not intended to be a global long-lived object. Stores provide no
+ * means of internal garbage collections of wasm objects (such as instances),
+ * meaning that no memory from a store will be deallocated until you call
+ * #wasmtime_store_delete. If you're working with a web server, for example,
+ * then it's recommended to think of a store as a "one per request" sort of
+ * construct. Globally you'd have one #wasm_engine_t and a cache of
+ * #wasmtime_module_t instances compiled into that engine. Each request would
+ * create a new #wasmtime_store_t and then instantiate a #wasmtime_module_t
+ * into the store. This process of creating a store and instantiating a module
+ * is expected to be quite fast. When the request is finished you'd delete the
+ * #wasmtime_store_t keeping memory usage reasonable for the lifetime of the
+ * server.
+ */
 
 #ifndef WASMTIME_API_H
 #define WASMTIME_API_H
 
-#include <wasm.h>
 #include <wasi.h>
+#include <wasmtime/config.h>
+#include <wasmtime/error.h>
+#include <wasmtime/extern.h>
+#include <wasmtime/func.h>
+#include <wasmtime/global.h>
+#include <wasmtime/instance.h>
+#include <wasmtime/linker.h>
+#include <wasmtime/memory.h>
+#include <wasmtime/module.h>
+#include <wasmtime/store.h>
+#include <wasmtime/table.h>
+#include <wasmtime/trap.h>
+#include <wasmtime/val.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define own
-
-#define WASMTIME_DECLARE_OWN(name) \
-  typedef struct wasmtime_##name##_t wasmtime_##name##_t; \
-  \
-  WASM_API_EXTERN void wasmtime_##name##_delete(own wasmtime_##name##_t*);
-
-WASMTIME_DECLARE_OWN(error)
-
-WASM_API_EXTERN void wasmtime_error_message(
-    const wasmtime_error_t *error,
-    own wasm_name_t *message
+/**
+ * \brief Converts from the text format of WebAssembly to to the binary format.
+ *
+ * \param wat this it the input pointer with the WebAssembly Text Format inside of
+ *   it. This will be parsed and converted to the binary format.
+ * \param wat_len this it the length of `wat`, in bytes.
+ * \param ret if the conversion is successful, this byte vector is filled in with
+ *   the WebAssembly binary format.
+ *
+ * \return a non-null error if parsing fails, or returns `NULL`. If parsing
+ * fails then `ret` isn't touched.
+ *
+ * This function does not take ownership of `wat`, and the caller is expected to
+ * deallocate the returned #wasmtime_error_t and #wasm_byte_vec_t.
+ */
+WASM_API_EXTERN wasmtime_error_t* wasmtime_wat2wasm(
+    const char *wat,
+    size_t wat_len,
+    wasm_byte_vec_t *ret
 );
-
-typedef uint8_t wasmtime_strategy_t;
-enum wasmtime_strategy_enum { // Strategy
-  WASMTIME_STRATEGY_AUTO,
-  WASMTIME_STRATEGY_CRANELIFT,
-  WASMTIME_STRATEGY_LIGHTBEAM,
-};
-
-typedef uint8_t wasmtime_opt_level_t;
-enum wasmtime_opt_level_enum { // OptLevel
-  WASMTIME_OPT_LEVEL_NONE,
-  WASMTIME_OPT_LEVEL_SPEED,
-  WASMTIME_OPT_LEVEL_SPEED_AND_SIZE,
-};
-
-typedef uint8_t wasmtime_profiling_strategy_t;
-enum wasmtime_profiling_strategy_enum { // ProfilingStrategy
-  WASMTIME_PROFILING_STRATEGY_NONE,
-  WASMTIME_PROFILING_STRATEGY_JITDUMP,
-  WASMTIME_PROFILING_STRATEGY_VTUNE,
-};
-
-#define WASMTIME_CONFIG_PROP(ret, name, ty) \
-    WASM_API_EXTERN ret wasmtime_config_##name##_set(wasm_config_t*, ty);
-
-WASMTIME_CONFIG_PROP(void, debug_info, bool)
-WASMTIME_CONFIG_PROP(void, interruptable, bool)
-WASMTIME_CONFIG_PROP(void, max_wasm_stack, size_t)
-WASMTIME_CONFIG_PROP(void, wasm_threads, bool)
-WASMTIME_CONFIG_PROP(void, wasm_reference_types, bool)
-WASMTIME_CONFIG_PROP(void, wasm_simd, bool)
-WASMTIME_CONFIG_PROP(void, wasm_bulk_memory, bool)
-WASMTIME_CONFIG_PROP(void, wasm_multi_value, bool)
-WASMTIME_CONFIG_PROP(wasmtime_error_t*, strategy, wasmtime_strategy_t)
-WASMTIME_CONFIG_PROP(void, cranelift_debug_verifier, bool)
-WASMTIME_CONFIG_PROP(void, cranelift_opt_level, wasmtime_opt_level_t)
-WASMTIME_CONFIG_PROP(wasmtime_error_t*, profiler, wasmtime_profiling_strategy_t)
-WASMTIME_CONFIG_PROP(void, static_memory_maximum_size, uint64_t)
-WASMTIME_CONFIG_PROP(void, static_memory_guard_size, uint64_t)
-WASMTIME_CONFIG_PROP(void, dynamic_memory_guard_size, uint64_t)
-
-WASM_API_EXTERN wasmtime_error_t* wasmtime_config_cache_config_load(wasm_config_t*, const char*);
-
-///////////////////////////////////////////////////////////////////////////////
-
-// Converts from the text format of WebAssembly to to the binary format.
-//
-// * `wat` - this it the input buffer with the WebAssembly Text Format inside of
-//   it. This will be parsed and converted to the binary format.
-// * `ret` - if the conversion is successful, this byte vector is filled in with
-//   the WebAssembly binary format.
-//
-// Returns a non-null error if parsing fails, or returns `NULL`. If parsing
-// fails then `ret` isn't touched.
-WASM_API_EXTERN own wasmtime_error_t* wasmtime_wat2wasm(
-    const wasm_byte_vec_t *wat,
-    own wasm_byte_vec_t *ret
-);
-
-///////////////////////////////////////////////////////////////////////////////
-//
-// wasmtime_linker_t extension type, binding the `Linker` type in the Rust API
-
-WASMTIME_DECLARE_OWN(linker)
-
-WASM_API_EXTERN own wasmtime_linker_t* wasmtime_linker_new(wasm_store_t* store);
-
-WASM_API_EXTERN void wasmtime_linker_allow_shadowing(wasmtime_linker_t* linker, bool allow_shadowing);
-
-WASM_API_EXTERN own wasmtime_error_t* wasmtime_linker_define(
-    wasmtime_linker_t *linker,
-    const wasm_name_t *module,
-    const wasm_name_t *name,
-    const wasm_extern_t *item
-);
-
-WASM_API_EXTERN own wasmtime_error_t* wasmtime_linker_define_wasi(
-    wasmtime_linker_t *linker,
-    const wasi_instance_t *instance
-);
-
-WASM_API_EXTERN own wasmtime_error_t* wasmtime_linker_define_instance(
-    wasmtime_linker_t *linker,
-    const wasm_name_t *name,
-    const wasm_instance_t *instance
-);
-
-WASM_API_EXTERN own wasmtime_error_t* wasmtime_linker_instantiate(
-    const wasmtime_linker_t *linker,
-    const wasm_module_t *module,
-    own wasm_instance_t **instance,
-    own wasm_trap_t **trap
-);
-
-WASM_API_EXTERN own wasmtime_error_t* wasmtime_linker_module(
-    const wasmtime_linker_t *linker,
-    const wasm_name_t *name,
-    const wasm_module_t *module
-);
-
-WASM_API_EXTERN own wasmtime_error_t* wasmtime_linker_get_default(
-    const wasmtime_linker_t *linker,
-    const wasm_name_t *name,
-    own wasm_func_t **func
-);
-
-WASM_API_EXTERN own wasmtime_error_t* wasmtime_linker_get_one_by_name(
-    const wasmtime_linker_t *linker,
-    const wasm_name_t *module,
-    const wasm_name_t *name,
-    own wasm_extern_t **item
-);
-
-///////////////////////////////////////////////////////////////////////////////
-//
-// wasmtime_caller_t extension, binding the `Caller` type in the Rust API
-
-typedef struct wasmtime_caller_t wasmtime_caller_t;
-
-typedef own wasm_trap_t* (*wasmtime_func_callback_t)(const wasmtime_caller_t* caller, const wasm_val_t args[], wasm_val_t results[]);
-typedef own wasm_trap_t* (*wasmtime_func_callback_with_env_t)(const wasmtime_caller_t* caller, void* env, const wasm_val_t args[], wasm_val_t results[]);
-
-WASM_API_EXTERN own wasm_func_t* wasmtime_func_new(wasm_store_t*, const wasm_functype_t*, wasmtime_func_callback_t callback);
-
-WASM_API_EXTERN own wasm_func_t* wasmtime_func_new_with_env(
-  wasm_store_t* store,
-  const wasm_functype_t* type,
-  wasmtime_func_callback_with_env_t callback,
-  void* env,
-  void (*finalizer)(void*)
-);
-
-WASM_API_EXTERN own wasm_extern_t* wasmtime_caller_export_get(const wasmtime_caller_t* caller, const wasm_name_t* name);
-
-///////////////////////////////////////////////////////////////////////////////
-//
-// wasmtime_interrupt_handle_t extension, allowing interruption of running wasm
-// modules.
-//
-// Note that `wasmtime_interrupt_handle_t` is safe to send to other threads and
-// interrupt/delete.
-//
-// Also note that `wasmtime_interrupt_handle_new` may return NULL if interrupts
-// are not enabled in `wasm_config_t`.
-
-WASMTIME_DECLARE_OWN(interrupt_handle)
-
-WASM_API_EXTERN own wasmtime_interrupt_handle_t *wasmtime_interrupt_handle_new(wasm_store_t *store);
-
-WASM_API_EXTERN void wasmtime_interrupt_handle_interrupt(wasmtime_interrupt_handle_t *handle);
-
-///////////////////////////////////////////////////////////////////////////////
-//
-// Extensions to `wasm_trap_t`
-
-// Returns `true` if the trap is a WASI "exit" trap and has a return status. If
-// `true` is returned then the exit status is returned through the `status`
-// pointer. If `false` is returned then this is not a wasi exit trap.
-WASM_API_EXTERN bool wasmtime_trap_exit_status(const wasm_trap_t*, int *status);
-
-///////////////////////////////////////////////////////////////////////////////
-//
-// Extensions to `wasm_frame_t`
-
-WASM_API_EXTERN const wasm_name_t *wasmtime_frame_func_name(const wasm_frame_t*);
-WASM_API_EXTERN const wasm_name_t *wasmtime_frame_module_name(const wasm_frame_t*);
-
-///////////////////////////////////////////////////////////////////////////////
-//
-// Extensions to the C API which augment existing functionality with extra
-// error reporting, safety, etc.
-
-// Similar to `wasm_func_call`, but with a few tweaks:
-//
-// * `args` and `results` have a size parameter saying how big the arrays are
-// * An error *and* a trap can be returned
-// * Errors are returned if `args` have the wrong types, if the args/results
-//   arrays have the wrong lengths, or if values come from the wrong store.
-//
-// The are three possible return states from this function:
-//
-// 1. The returned error is non-null. This means `results`
-//    wasn't written to and `trap` will have `NULL` written to it. This state
-//    means that programmer error happened when calling the function (e.g. the
-//    size of the args/results were wrong)
-// 2. The trap pointer is filled in. This means the returned error is `NULL` and
-//    `results` was not written to. This state means that the function was
-//    executing but hit a wasm trap while executing.
-// 3. The error and trap returned are both `NULL` and `results` are written to.
-//    This means that the function call worked and the specified results were
-//    produced.
-//
-// The `trap` pointer cannot be `NULL`. The `args` and `results` pointers may be
-// `NULL` if the corresponding length is zero.
-WASM_API_EXTERN own wasmtime_error_t *wasmtime_func_call(
-    wasm_func_t *func,
-    const wasm_val_t *args,
-    size_t num_args,
-    wasm_val_t *results,
-    size_t num_results,
-    own wasm_trap_t **trap
-);
-
-// Similar to `wasm_global_new`, but with a few tweaks:
-//
-// * An error is returned instead of `wasm_global_t`, which is taken as an
-//   out-parameter
-// * An error happens when the `type` specified does not match the type of the
-//   value `val`, or if it comes from a different store than `store`.
-WASM_API_EXTERN own wasmtime_error_t *wasmtime_global_new(
-    wasm_store_t *store,
-    const wasm_globaltype_t *type,
-    const wasm_val_t *val,
-    own wasm_global_t **ret
-);
-
-// Similar to `wasm_global_set`, but with an error that can be returned if the
-// specified value does not come from the same store as this global, if the
-// global is immutable, or if the specified value has the wrong type.
-WASM_API_EXTERN own wasmtime_error_t *wasmtime_global_set(
-    wasm_global_t *global,
-    const wasm_val_t *val
-);
-
-// Similar to `wasm_instance_new`, but with tweaks:
-//
-// * An error message can be returned from this function.
-// * The number of imports specified is passed as an argument
-// * The `trap` pointer is required to not be NULL.
-// * No `wasm_store_t` argument is required.
-//
-// The states of return values from this function are similar to
-// `wasmtime_func_call` where an error can be returned meaning something like a
-// link error in this context. A trap can be returned (meaning no error or
-// instance is returned), or an instance can be returned (meaning no error or
-// trap is returned).
-WASM_API_EXTERN own wasmtime_error_t *wasmtime_instance_new(
-    wasm_store_t *store,
-    const wasm_module_t *module,
-    const wasm_extern_t* const imports[],
-    size_t num_imports,
-    own wasm_instance_t **instance,
-    own wasm_trap_t **trap
-);
-
-// Similar to `wasm_module_new`, but an error is returned to return a
-// descriptive error message in case compilation fails.
-WASM_API_EXTERN own wasmtime_error_t *wasmtime_module_new(
-    wasm_store_t *store,
-    const wasm_byte_vec_t *binary,
-    own wasm_module_t **ret
-);
-
-// Similar to `wasm_module_validate`, but an error is returned to return a
-// descriptive error message in case compilation fails.
-WASM_API_EXTERN own wasmtime_error_t *wasmtime_module_validate(
-    wasm_store_t *store,
-    const wasm_byte_vec_t *binary
-);
-
-
-// Similar to `wasm_table_*`, except these explicitly operate on funcref tables
-// and work with `wasm_func_t` values instead of `wasm_ref_t`.
-WASM_API_EXTERN own wasmtime_error_t *wasmtime_funcref_table_new(
-    wasm_store_t *store,
-    const wasm_tabletype_t *element_ty,
-    wasm_func_t *init,
-    own wasm_table_t **table
-);
-WASM_API_EXTERN bool wasmtime_funcref_table_get(
-    const wasm_table_t *table,
-    wasm_table_size_t index,
-    own wasm_func_t **func
-);
-WASM_API_EXTERN own wasmtime_error_t *wasmtime_funcref_table_set(
-    wasm_table_t *table,
-    wasm_table_size_t index,
-    const wasm_func_t *value
-);
-WASM_API_EXTERN wasmtime_error_t *wasmtime_funcref_table_grow(
-    wasm_table_t *table,
-    wasm_table_size_t delta,
-    const wasm_func_t *init,
-    wasm_table_size_t *prev_size
-);
-
-#undef own
 
 #ifdef __cplusplus
 }  // extern "C"

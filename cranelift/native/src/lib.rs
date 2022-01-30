@@ -16,96 +16,134 @@
         clippy::float_arithmetic,
         clippy::mut_mut,
         clippy::nonminimal_bool,
-        clippy::option_map_unwrap_or,
-        clippy::option_map_unwrap_or_else,
-        clippy::print_stdout,
+        clippy::map_unwrap_or,
+        clippy::clippy::print_stdout,
         clippy::unicode_not_nfc,
         clippy::use_self
     )
 )]
-#![no_std]
 
 use cranelift_codegen::isa;
 use target_lexicon::Triple;
-
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use raw_cpuid::CpuId;
 
 /// Return an `isa` builder configured for the current host
 /// machine, or `Err(())` if the host machine is not supported
 /// in the current configuration.
 pub fn builder() -> Result<isa::Builder, &'static str> {
+    builder_with_options(true)
+}
+
+/// Return an `isa` builder configured for the current host
+/// machine, or `Err(())` if the host machine is not supported
+/// in the current configuration.
+///
+/// Selects the given backend variant specifically; this is
+/// useful when more than oen backend exists for a given target
+/// (e.g., on x86-64).
+pub fn builder_with_options(infer_native_flags: bool) -> Result<isa::Builder, &'static str> {
     let mut isa_builder = isa::lookup(Triple::host()).map_err(|err| match err {
         isa::LookupError::SupportDisabled => "support for architecture disabled at compile time",
         isa::LookupError::Unsupported => "unsupported architecture",
     })?;
 
-    if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
-        parse_x86_cpuid(&mut isa_builder)?;
-    }
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        use cranelift_codegen::settings::Configurable;
 
-    Ok(isa_builder)
-}
-
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn parse_x86_cpuid(isa_builder: &mut isa::Builder) -> Result<(), &'static str> {
-    use cranelift_codegen::settings::Configurable;
-    let cpuid = CpuId::new();
-
-    if let Some(info) = cpuid.get_feature_info() {
-        if !info.has_sse2() {
+        if !std::is_x86_feature_detected!("sse2") {
             return Err("x86 support requires SSE2");
         }
-        if info.has_sse3() {
+
+        if !infer_native_flags {
+            return Ok(isa_builder);
+        }
+
+        if std::is_x86_feature_detected!("sse3") {
             isa_builder.enable("has_sse3").unwrap();
         }
-        if info.has_ssse3() {
+        if std::is_x86_feature_detected!("ssse3") {
             isa_builder.enable("has_ssse3").unwrap();
         }
-        if info.has_sse41() {
+        if std::is_x86_feature_detected!("sse4.1") {
             isa_builder.enable("has_sse41").unwrap();
         }
-        if info.has_sse42() {
+        if std::is_x86_feature_detected!("sse4.2") {
             isa_builder.enable("has_sse42").unwrap();
         }
-        if info.has_popcnt() {
+        if std::is_x86_feature_detected!("popcnt") {
             isa_builder.enable("has_popcnt").unwrap();
         }
-        if info.has_avx() {
+        if std::is_x86_feature_detected!("avx") {
             isa_builder.enable("has_avx").unwrap();
         }
-    }
-    if let Some(info) = cpuid.get_extended_feature_info() {
-        if info.has_bmi1() {
-            isa_builder.enable("has_bmi1").unwrap();
-        }
-        if info.has_bmi2() {
-            isa_builder.enable("has_bmi2").unwrap();
-        }
-        if info.has_avx2() {
+        if std::is_x86_feature_detected!("avx2") {
             isa_builder.enable("has_avx2").unwrap();
         }
-        if info.has_avx512dq() {
+        if std::is_x86_feature_detected!("bmi1") {
+            isa_builder.enable("has_bmi1").unwrap();
+        }
+        if std::is_x86_feature_detected!("bmi2") {
+            isa_builder.enable("has_bmi2").unwrap();
+        }
+        if std::is_x86_feature_detected!("avx512bitalg") {
+            isa_builder.enable("has_avx512bitalg").unwrap();
+        }
+        if std::is_x86_feature_detected!("avx512dq") {
             isa_builder.enable("has_avx512dq").unwrap();
         }
-        if info.has_avx512vl() {
-            isa_builder.enable("has_avx512vl").unwrap();
-        }
-        if info.has_avx512f() {
+        if std::is_x86_feature_detected!("avx512f") {
             isa_builder.enable("has_avx512f").unwrap();
         }
-    }
-    if let Some(info) = cpuid.get_extended_function_info() {
-        if info.has_lzcnt() {
+        if std::is_x86_feature_detected!("avx512vl") {
+            isa_builder.enable("has_avx512vl").unwrap();
+        }
+        if std::is_x86_feature_detected!("avx512vbmi") {
+            isa_builder.enable("has_avx512vbmi").unwrap();
+        }
+        if std::is_x86_feature_detected!("lzcnt") {
             isa_builder.enable("has_lzcnt").unwrap();
         }
     }
-    Ok(())
-}
 
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-fn parse_x86_cpuid(_isa_builder: &mut isa::Builder) -> Result<(), &'static str> {
-    unreachable!();
+    // `stdsimd` is necessary for std::is_aarch64_feature_detected!().
+    #[cfg(all(target_arch = "aarch64", feature = "stdsimd"))]
+    {
+        use cranelift_codegen::settings::Configurable;
+
+        if !infer_native_flags {
+            return Ok(isa_builder);
+        }
+
+        if std::is_aarch64_feature_detected!("lse") {
+            isa_builder.enable("has_lse").unwrap();
+        }
+    }
+
+    // There is no is_s390x_feature_detected macro yet, so for now
+    // we use getauxval from the libc crate directly.
+    #[cfg(all(target_arch = "s390x", target_os = "linux"))]
+    {
+        use cranelift_codegen::settings::Configurable;
+
+        if !infer_native_flags {
+            return Ok(isa_builder);
+        }
+
+        let v = unsafe { libc::getauxval(libc::AT_HWCAP) };
+        const HWCAP_S390X_VXRS_EXT2: libc::c_ulong = 32768;
+        if (v & HWCAP_S390X_VXRS_EXT2) != 0 {
+            isa_builder.enable("has_vxrs_ext2").unwrap();
+            // There is no separate HWCAP bit for mie2, so assume
+            // that any machine with vxrs_ext2 also has mie2.
+            isa_builder.enable("has_mie2").unwrap();
+        }
+    }
+
+    // squelch warnings about unused mut/variables on some platforms.
+    drop(&mut isa_builder);
+    drop(infer_native_flags);
+
+    Ok(isa_builder)
 }
 
 #[cfg(test)]
@@ -119,18 +157,20 @@ mod tests {
         if let Ok(isa_builder) = builder() {
             let flag_builder = settings::builder();
             let isa = isa_builder.finish(settings::Flags::new(flag_builder));
-            if cfg!(any(unix, target_os = "nebulet")) {
+
+            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                assert_eq!(isa.default_call_conv(), CallConv::AppleAarch64);
+            } else if cfg!(any(unix, target_os = "nebulet")) {
                 assert_eq!(isa.default_call_conv(), CallConv::SystemV);
             } else if cfg!(windows) {
                 assert_eq!(isa.default_call_conv(), CallConv::WindowsFastcall);
             }
+
             if cfg!(target_pointer_width = "64") {
                 assert_eq!(isa.pointer_bits(), 64);
-            }
-            if cfg!(target_pointer_width = "32") {
+            } else if cfg!(target_pointer_width = "32") {
                 assert_eq!(isa.pointer_bits(), 32);
-            }
-            if cfg!(target_pointer_width = "16") {
+            } else if cfg!(target_pointer_width = "16") {
                 assert_eq!(isa.pointer_bits(), 16);
             }
         }

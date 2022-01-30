@@ -17,19 +17,18 @@ fn main() -> anyhow::Result<()> {
     );
     let mut out = String::new();
 
-    for strategy in &[
-        "Cranelift",
-        #[cfg(feature = "lightbeam")]
-        "Lightbeam",
-    ] {
+    for strategy in &["Cranelift"] {
         writeln!(out, "#[cfg(test)]")?;
         writeln!(out, "#[allow(non_snake_case)]")?;
         writeln!(out, "mod {} {{", strategy)?;
 
         with_test_module(&mut out, "misc", |out| {
             test_directory(out, "tests/misc_testsuite", strategy)?;
-            test_directory_module(out, "tests/misc_testsuite/bulk-memory-operations", strategy)?;
-            test_directory_module(out, "tests/misc_testsuite/reference-types", strategy)?;
+            test_directory_module(out, "tests/misc_testsuite/multi-memory", strategy)?;
+            test_directory_module(out, "tests/misc_testsuite/module-linking", strategy)?;
+            test_directory_module(out, "tests/misc_testsuite/simd", strategy)?;
+            test_directory_module(out, "tests/misc_testsuite/threads", strategy)?;
+            test_directory_module(out, "tests/misc_testsuite/memory64", strategy)?;
             Ok(())
         })?;
 
@@ -39,17 +38,7 @@ fn main() -> anyhow::Result<()> {
             // out.
             if spec_tests > 0 {
                 test_directory_module(out, "tests/spec_testsuite/proposals/simd", strategy)?;
-                test_directory_module(out, "tests/spec_testsuite/proposals/multi-value", strategy)?;
-                test_directory_module(
-                    out,
-                    "tests/spec_testsuite/proposals/reference-types",
-                    strategy,
-                )?;
-                test_directory_module(
-                    out,
-                    "tests/spec_testsuite/proposals/bulk-memory-operations",
-                    strategy,
-                )?;
+                test_directory_module(out, "tests/spec_testsuite/proposals/memory64", strategy)?;
             } else {
                 println!(
                     "cargo:warning=The spec testsuite is disabled. To enable, run `git submodule \
@@ -109,7 +98,8 @@ fn test_directory(
 
     let testsuite = &extract_name(path);
     for entry in dir_entries.iter() {
-        write_testsuite_tests(out, entry, testsuite, strategy)?;
+        write_testsuite_tests(out, entry, testsuite, strategy, false)?;
+        write_testsuite_tests(out, entry, testsuite, strategy, true)?;
     }
 
     Ok(dir_entries.len())
@@ -146,21 +136,30 @@ fn write_testsuite_tests(
     path: impl AsRef<Path>,
     testsuite: &str,
     strategy: &str,
+    pooling: bool,
 ) -> anyhow::Result<()> {
     let path = path.as_ref();
     let testname = extract_name(path);
 
     writeln!(out, "#[test]")?;
+    // Ignore when using QEMU for running tests (limited memory).
     if ignore(testsuite, &testname, strategy) {
         writeln!(out, "#[ignore]")?;
     }
-    writeln!(out, "fn r#{}() {{", &testname)?;
+
+    writeln!(
+        out,
+        "fn r#{}{}() {{",
+        &testname,
+        if pooling { "_pooling" } else { "" }
+    )?;
     writeln!(out, "    let _ = env_logger::try_init();")?;
     writeln!(
         out,
-        "    crate::wast::run_wast(r#\"{}\"#, crate::wast::Strategy::{}).unwrap();",
+        "    crate::wast::run_wast(r#\"{}\"#, crate::wast::Strategy::{}, {}).unwrap();",
         path.display(),
-        strategy
+        strategy,
+        pooling
     )?;
     writeln!(out, "}}")?;
     writeln!(out)?;
@@ -169,67 +168,21 @@ fn write_testsuite_tests(
 
 /// Ignore tests that aren't supported yet.
 fn ignore(testsuite: &str, testname: &str, strategy: &str) -> bool {
-    let target = env::var("TARGET").unwrap();
     match strategy {
-        #[cfg(feature = "lightbeam")]
-        "Lightbeam" => match (testsuite, testname) {
-            ("simd", _) => return true,
-            ("multi_value", _) => return true,
-            ("reference_types", _) => return true,
-            ("bulk_memory_operations", _) => return true,
-            _ => (),
-        },
         "Cranelift" => match (testsuite, testname) {
-            ("simd", "simd_address") => return false,
-            ("simd", "simd_align") => return false,
-            ("simd", "simd_bitwise") => return false,
-            ("simd", "simd_boolean") => return false,
-            ("simd", "simd_f32x4_cmp") => return false,
-            ("simd", "simd_f64x2_cmp") => return false,
-            ("simd", "simd_i8x16_cmp") => return false,
-            ("simd", "simd_i16x8_cmp") => return false,
-            ("simd", "simd_i32x4_cmp") => return false,
-            ("simd", "simd_load_extend") => return false,
-            ("simd", "simd_load_splat") => return false,
-            ("simd", "simd_store") => return false,
-            // Most simd tests are known to fail on aarch64 for now, it's going
-            // to be a big chunk of work to implement them all there!
-            ("simd", _) if target.contains("aarch64") => return true,
-
-            ("simd", "simd_conversions") => return true, // FIXME Unsupported feature: proposed SIMD operator I32x4TruncSatF32x4S
-            ("simd", "simd_f32x4") => return true, // FIXME expected V128(F32x4([CanonicalNan, CanonicalNan, Value(Float32 { bits: 0 }), Value(Float32 { bits: 0 })])), got V128(18428729675200069632)
-            ("simd", "simd_f64x2") => return true, // FIXME expected V128(F64x2([Value(Float64 { bits: 9221120237041090560 }), Value(Float64 { bits: 0 })])), got V128(0)
-            ("simd", "simd_f64x2_arith") => return true, // FIXME expected V128(F64x2([Value(Float64 { bits: 9221120237041090560 }), Value(Float64 { bits: 13835058055282163712 })])), got V128(255211775190703847615975447847722024960)
-            ("simd", "simd_load") => return true, // FIXME Unsupported feature: proposed SIMD operator I32x4TruncSatF32x4S
-            ("simd", "simd_splat") => return true, // FIXME Unsupported feature: proposed SIMD operator I32x4TruncSatF32x4S
-
-            // not parsed in wasmparser yet
-            ("simd", "simd_i32x4_arith2") => return true,
-            ("simd", "simd_i16x8_arith2") => return true,
-            ("simd", "simd_i8x16_arith2") => return true,
-
-            // waiting for the upstream spec to get updated with new binary
-            // encodings of operations and for that to propagate to the
-            // testsuite repo.
-            ("simd", "simd_const") => return true,
-
-            ("reference_types", "table_copy_on_imported_tables")
-            | ("reference_types", "externref_id_function")
-            | ("reference_types", "table_size")
-            | ("reference_types", "simple_ref_is_null")
-            | ("reference_types", "table_grow_with_funcref") => {
-                // TODO(#1886): Ignore if this isn't x64, because Cranelift only
-                // supports reference types on x64.
-                return env::var("CARGO_CFG_TARGET_ARCH").unwrap() != "x86_64";
-            }
-
-            // Still working on implementing these. See #929.
-            ("reference_types", _) => return true,
-
+            // No simd support yet for s390x.
+            ("simd", _) if platform_is_s390x() => return true,
+            ("memory64", "simd") if platform_is_s390x() => return true,
+            // No full atomics support yet for s390x.
+            ("memory64", "threads") if platform_is_s390x() => return true,
             _ => {}
         },
         _ => panic!("unrecognized strategy"),
     }
 
     false
+}
+
+fn platform_is_s390x() -> bool {
+    env::var("CARGO_CFG_TARGET_ARCH").unwrap() == "s390x"
 }

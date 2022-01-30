@@ -1,91 +1,74 @@
 #[cfg(not(target_os = "windows"))]
 mod not_for_windows {
     use wasmtime::*;
-    use wasmtime_environ::{WASM_MAX_PAGES, WASM_PAGE_SIZE};
+    use wasmtime_environ::{WASM32_MAX_PAGES, WASM_PAGE_SIZE};
 
-    use libc::c_void;
-    use libc::MAP_FAILED;
-    use libc::{mmap, mprotect, munmap};
-    use libc::{sysconf, _SC_PAGESIZE};
-    use libc::{MAP_ANON, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE};
+    use rustix::io::{mmap_anonymous, mprotect, munmap, MapFlags, MprotectFlags, ProtFlags};
 
-    use std::cell::RefCell;
-    use std::io::Error;
+    use std::convert::TryFrom;
     use std::ptr::null_mut;
     use std::sync::{Arc, Mutex};
 
     struct CustomMemory {
-        mem: *mut c_void,
+        mem: usize,
         size: usize,
-        used_wasm_pages: RefCell<u32>,
-        glob_page_counter: Arc<Mutex<u64>>,
+        guard_size: usize,
+        used_wasm_bytes: usize,
+        glob_bytes_counter: Arc<Mutex<usize>>,
     }
 
     impl CustomMemory {
-        unsafe fn new(
-            num_wasm_pages: u32,
-            max_wasm_pages: u32,
-            glob_counter: Arc<Mutex<u64>>,
-        ) -> Self {
-            let page_size = sysconf(_SC_PAGESIZE) as usize;
+        unsafe fn new(minimum: usize, maximum: usize, glob_counter: Arc<Mutex<usize>>) -> Self {
+            let page_size = rustix::process::page_size();
             let guard_size = page_size;
-            let size = max_wasm_pages as usize * WASM_PAGE_SIZE as usize + guard_size;
-            let used_size = num_wasm_pages as usize * WASM_PAGE_SIZE as usize;
+            let size = maximum + guard_size;
             assert_eq!(size % page_size, 0); // we rely on WASM_PAGE_SIZE being multiple of host page size
 
-            let mem = mmap(null_mut(), size, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-            assert_ne!(mem, MAP_FAILED, "mmap failed: {}", Error::last_os_error());
+            let mem = mmap_anonymous(null_mut(), size, ProtFlags::empty(), MapFlags::PRIVATE)
+                .expect("mmap failed");
 
-            let r = mprotect(mem, used_size, PROT_READ | PROT_WRITE);
-            assert_eq!(r, 0, "mprotect failed: {}", Error::last_os_error());
-            *glob_counter.lock().unwrap() += num_wasm_pages as u64;
+            mprotect(mem, minimum, MprotectFlags::READ | MprotectFlags::WRITE)
+                .expect("mprotect failed");
+            *glob_counter.lock().unwrap() += minimum;
 
             Self {
-                mem,
+                mem: mem as usize,
                 size,
-                used_wasm_pages: RefCell::new(num_wasm_pages),
-                glob_page_counter: glob_counter,
+                guard_size,
+                used_wasm_bytes: minimum,
+                glob_bytes_counter: glob_counter,
             }
         }
     }
 
     impl Drop for CustomMemory {
         fn drop(&mut self) {
-            let n = *self.used_wasm_pages.borrow() as u64;
-            *self.glob_page_counter.lock().unwrap() -= n;
-            let r = unsafe { munmap(self.mem, self.size) };
-            assert_eq!(r, 0, "munmap failed: {}", Error::last_os_error());
+            *self.glob_bytes_counter.lock().unwrap() -= self.used_wasm_bytes;
+            unsafe { munmap(self.mem as *mut _, self.size).expect("munmap failed") };
         }
     }
 
     unsafe impl LinearMemory for CustomMemory {
-        fn size(&self) -> u32 {
-            *self.used_wasm_pages.borrow()
+        fn byte_size(&self) -> usize {
+            self.used_wasm_bytes
         }
 
-        fn grow(&self, delta: u32) -> Option<u32> {
-            let delta_size = (delta as usize).checked_mul(WASM_PAGE_SIZE as usize)?;
+        fn maximum_byte_size(&self) -> Option<usize> {
+            Some(self.size - self.guard_size)
+        }
 
-            let prev_pages = *self.used_wasm_pages.borrow();
-            let prev_size = (prev_pages as usize).checked_mul(WASM_PAGE_SIZE as usize)?;
-
-            let new_pages = prev_pages.checked_add(delta)?;
-            let new_size = (new_pages as usize).checked_mul(WASM_PAGE_SIZE as usize)?;
-
-            let guard_size = unsafe { sysconf(_SC_PAGESIZE) as usize };
-
-            if new_size > self.size - guard_size {
-                return None;
-            }
+        fn grow_to(&mut self, new_size: usize) -> Result<(), anyhow::Error> {
+            println!("grow to {:x}", new_size);
+            let delta = new_size - self.used_wasm_bytes;
             unsafe {
-                let start = (self.mem as *mut u8).add(prev_size) as _;
-                let r = mprotect(start, delta_size, PROT_READ | PROT_WRITE);
-                assert_eq!(r, 0, "mprotect failed: {}", Error::last_os_error());
+                let start = (self.mem as *mut u8).add(self.used_wasm_bytes) as _;
+                mprotect(start, delta, MprotectFlags::READ | MprotectFlags::WRITE)
+                    .expect("mprotect failed");
             }
 
-            *self.glob_page_counter.lock().unwrap() += delta as u64;
-            *self.used_wasm_pages.borrow_mut() = new_pages;
-            Some(prev_pages)
+            *self.glob_bytes_counter.lock().unwrap() += delta;
+            self.used_wasm_bytes = new_size;
+            Ok(())
         }
 
         fn as_ptr(&self) -> *mut u8 {
@@ -95,14 +78,14 @@ mod not_for_windows {
 
     struct CustomMemoryCreator {
         pub num_created_memories: Mutex<usize>,
-        pub num_total_pages: Arc<Mutex<u64>>,
+        pub num_total_bytes: Arc<Mutex<usize>>,
     }
 
     impl CustomMemoryCreator {
         pub fn new() -> Self {
             Self {
                 num_created_memories: Mutex::new(0),
-                num_total_pages: Arc::new(Mutex::new(0)),
+                num_total_bytes: Arc::new(Mutex::new(0)),
             }
         }
     }
@@ -111,17 +94,21 @@ mod not_for_windows {
         fn new_memory(
             &self,
             ty: MemoryType,
-            reserved_size: Option<u64>,
-            guard_size: u64,
+            minimum: usize,
+            maximum: Option<usize>,
+            reserved_size: Option<usize>,
+            guard_size: usize,
         ) -> Result<Box<dyn LinearMemory>, String> {
             assert_eq!(guard_size, 0);
             assert!(reserved_size.is_none());
-            let max = ty.limits().max().unwrap_or(WASM_MAX_PAGES);
+            assert!(!ty.is_64());
             unsafe {
                 let mem = Box::new(CustomMemory::new(
-                    ty.limits().min(),
-                    max,
-                    self.num_total_pages.clone(),
+                    minimum,
+                    maximum.unwrap_or(
+                        usize::try_from(WASM32_MAX_PAGES * u64::from(WASM_PAGE_SIZE)).unwrap(),
+                    ),
+                    self.num_total_bytes.clone(),
                 ));
                 *self.num_created_memories.lock().unwrap() += 1;
                 Ok(mem)
@@ -129,19 +116,19 @@ mod not_for_windows {
         }
     }
 
-    fn config() -> (Store, Arc<CustomMemoryCreator>) {
+    fn config() -> (Store<()>, Arc<CustomMemoryCreator>) {
         let mem_creator = Arc::new(CustomMemoryCreator::new());
         let mut config = Config::new();
         config
             .with_host_memory(mem_creator.clone())
             .static_memory_maximum_size(0)
             .dynamic_memory_guard_size(0);
-        (Store::new(&Engine::new(&config)), mem_creator)
+        (Store::new(&Engine::new(&config).unwrap(), ()), mem_creator)
     }
 
     #[test]
     fn host_memory() -> anyhow::Result<()> {
-        let (store, mem_creator) = config();
+        let (mut store, mem_creator) = config();
         let module = Module::new(
             store.engine(),
             r#"
@@ -150,7 +137,7 @@ mod not_for_windows {
             )
         "#,
         )?;
-        Instance::new(&store, &module, &[])?;
+        Instance::new(&mut store, &module, &[])?;
 
         assert_eq!(*mem_creator.num_created_memories.lock().unwrap(), 1);
 
@@ -159,7 +146,7 @@ mod not_for_windows {
 
     #[test]
     fn host_memory_grow() -> anyhow::Result<()> {
-        let (store, mem_creator) = config();
+        let (mut store, mem_creator) = config();
         let module = Module::new(
             store.engine(),
             r#"
@@ -171,19 +158,25 @@ mod not_for_windows {
         "#,
         )?;
 
-        let instance1 = Instance::new(&store, &module, &[])?;
-        let instance2 = Instance::new(&store, &module, &[])?;
+        Instance::new(&mut store, &module, &[])?;
+        let instance2 = Instance::new(&mut store, &module, &[])?;
 
         assert_eq!(*mem_creator.num_created_memories.lock().unwrap(), 2);
 
-        assert_eq!(instance2.get_memory("memory").unwrap().size(), 2);
+        assert_eq!(
+            instance2
+                .get_memory(&mut store, "memory")
+                .unwrap()
+                .size(&store),
+            2
+        );
 
         // we take the lock outside the assert, so it won't get poisoned on assert failure
-        let tot_pages = *mem_creator.num_total_pages.lock().unwrap();
-        assert_eq!(tot_pages, 4);
+        let tot_pages = *mem_creator.num_total_bytes.lock().unwrap();
+        assert_eq!(tot_pages, (4 * WASM_PAGE_SIZE) as usize);
 
-        drop((instance1, instance2, store, module));
-        let tot_pages = *mem_creator.num_total_pages.lock().unwrap();
+        drop(store);
+        let tot_pages = *mem_creator.num_total_bytes.lock().unwrap();
         assert_eq!(tot_pages, 0);
 
         Ok(())

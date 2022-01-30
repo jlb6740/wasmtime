@@ -5,12 +5,14 @@
 //!
 //! This module declares the data types used to represent external functions and call signatures.
 
-use crate::ir::{ArgumentLoc, ExternalName, SigRef, Type};
-use crate::isa::{CallConv, RegInfo, RegUnit};
+use crate::ir::{ExternalName, SigRef, Type};
+use crate::isa::CallConv;
 use crate::machinst::RelocDistance;
 use alloc::vec::Vec;
 use core::fmt;
 use core::str::FromStr;
+#[cfg(feature = "enable-serde")]
+use serde::{Deserialize, Serialize};
 
 /// Function signature.
 ///
@@ -20,6 +22,7 @@ use core::str::FromStr;
 /// A signature can optionally include ISA-specific ABI information which specifies exactly how
 /// arguments and return values are passed.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct Signature {
     /// The arguments passed to the function.
     pub params: Vec<AbiParam>,
@@ -45,11 +48,6 @@ impl Signature {
         self.params.clear();
         self.returns.clear();
         self.call_conv = call_conv;
-    }
-
-    /// Return an object that can display `self` with correct register names.
-    pub fn display<'a, R: Into<Option<&'a RegInfo>>>(&'a self, regs: R) -> DisplaySignature<'a> {
-        DisplaySignature(self, regs.into())
     }
 
     /// Find the index of a presumed unique special-purpose parameter.
@@ -105,38 +103,29 @@ impl Signature {
     }
 }
 
-/// Wrapper type capable of displaying a `Signature` with correct register names.
-pub struct DisplaySignature<'a>(&'a Signature, Option<&'a RegInfo>);
-
-fn write_list(f: &mut fmt::Formatter, args: &[AbiParam], regs: Option<&RegInfo>) -> fmt::Result {
+fn write_list(f: &mut fmt::Formatter, args: &[AbiParam]) -> fmt::Result {
     match args.split_first() {
         None => {}
         Some((first, rest)) => {
-            write!(f, "{}", first.display(regs))?;
+            write!(f, "{}", first)?;
             for arg in rest {
-                write!(f, ", {}", arg.display(regs))?;
+                write!(f, ", {}", arg)?;
             }
         }
     }
     Ok(())
 }
 
-impl<'a> fmt::Display for DisplaySignature<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "(")?;
-        write_list(f, &self.0.params, self.1)?;
-        write!(f, ")")?;
-        if !self.0.returns.is_empty() {
-            write!(f, " -> ")?;
-            write_list(f, &self.0.returns, self.1)?;
-        }
-        write!(f, " {}", self.0.call_conv)
-    }
-}
-
 impl fmt::Display for Signature {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.display(None).fmt(f)
+        write!(f, "(")?;
+        write_list(f, &self.params)?;
+        write!(f, ")")?;
+        if !self.returns.is_empty() {
+            write!(f, " -> ")?;
+            write_list(f, &self.returns)?;
+        }
+        write!(f, " {}", self.call_conv)
     }
 }
 
@@ -145,6 +134,7 @@ impl fmt::Display for Signature {
 /// This describes the value type being passed to or from a function along with flags that affect
 /// how the argument is passed.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct AbiParam {
     /// Type of the argument value.
     pub value_type: Type,
@@ -153,9 +143,6 @@ pub struct AbiParam {
     /// Method for extending argument to a full register.
     pub extension: ArgumentExtension,
 
-    /// ABI-specific location of this argument, or `Unassigned` for arguments that have not yet
-    /// been legalized.
-    pub location: ArgumentLoc,
     /// Was the argument converted to pointer during legalization?
     pub legalized_to_pointer: bool,
 }
@@ -167,7 +154,6 @@ impl AbiParam {
             value_type: vt,
             extension: ArgumentExtension::None,
             purpose: ArgumentPurpose::Normal,
-            location: Default::default(),
             legalized_to_pointer: false,
         }
     }
@@ -178,18 +164,6 @@ impl AbiParam {
             value_type: vt,
             extension: ArgumentExtension::None,
             purpose,
-            location: Default::default(),
-            legalized_to_pointer: false,
-        }
-    }
-
-    /// Create a parameter for a special-purpose register.
-    pub fn special_reg(vt: Type, purpose: ArgumentPurpose, regunit: RegUnit) -> Self {
-        Self {
-            value_type: vt,
-            extension: ArgumentExtension::None,
-            purpose,
-            location: ArgumentLoc::Reg(regunit),
             legalized_to_pointer: false,
         }
     }
@@ -211,50 +185,43 @@ impl AbiParam {
             ..self
         }
     }
-
-    /// Return an object that can display `self` with correct register names.
-    pub fn display<'a, R: Into<Option<&'a RegInfo>>>(&'a self, regs: R) -> DisplayAbiParam<'a> {
-        DisplayAbiParam(self, regs.into())
-    }
-}
-
-/// Wrapper type capable of displaying a `AbiParam` with correct register names.
-pub struct DisplayAbiParam<'a>(&'a AbiParam, Option<&'a RegInfo>);
-
-impl<'a> fmt::Display for DisplayAbiParam<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.0.value_type)?;
-        if self.0.legalized_to_pointer {
-            write!(f, " ptr")?;
-        }
-        match self.0.extension {
-            ArgumentExtension::None => {}
-            ArgumentExtension::Uext => write!(f, " uext")?,
-            ArgumentExtension::Sext => write!(f, " sext")?,
-        }
-        if self.0.purpose != ArgumentPurpose::Normal {
-            write!(f, " {}", self.0.purpose)?;
-        }
-
-        if self.0.location.is_assigned() {
-            write!(f, " [{}]", self.0.location.display(self.1))?;
-        }
-
-        Ok(())
-    }
 }
 
 impl fmt::Display for AbiParam {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.display(None).fmt(f)
+        write!(f, "{}", self.value_type)?;
+        if self.legalized_to_pointer {
+            write!(f, " ptr")?;
+        }
+        match self.extension {
+            ArgumentExtension::None => {}
+            ArgumentExtension::Uext => write!(f, " uext")?,
+            ArgumentExtension::Sext => write!(f, " sext")?,
+        }
+        if self.purpose != ArgumentPurpose::Normal {
+            write!(f, " {}", self.purpose)?;
+        }
+        Ok(())
     }
 }
 
 /// Function argument extension options.
 ///
-/// On some architectures, small integer function arguments are extended to the width of a
-/// general-purpose register.
+/// On some architectures, small integer function arguments and/or return values are extended to
+/// the width of a general-purpose register.
+///
+/// This attribute specifies how an argument or return value should be extended *if the platform
+/// and ABI require it*. Because the frontend (CLIF generator) does not know anything about the
+/// particulars of the target's ABI, and the CLIF should be platform-independent, these attributes
+/// specify *how* to extend (according to the signedness of the original program) rather than
+/// *whether* to extend.
+///
+/// For example, on x86-64, the SystemV ABI does not require extensions of narrow values, so these
+/// `ArgumentExtension` attributes are ignored; but in the Baldrdash (SpiderMonkey) ABI on the same
+/// platform, all narrow values *are* extended, so these attributes may lead to extra
+/// zero/sign-extend instructions in the generated machine code.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub enum ArgumentExtension {
     /// No extension, high bits are indeterminate.
     None,
@@ -272,9 +239,13 @@ pub enum ArgumentExtension {
 ///
 /// The argument purpose is used to indicate any special meaning of an argument or return value.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub enum ArgumentPurpose {
     /// A normal user program value passed to or from a function.
     Normal,
+
+    /// A C struct passed as argument.
+    StructArgument(u32),
 
     /// Struct return pointer.
     ///
@@ -326,23 +297,37 @@ pub enum ArgumentPurpose {
     /// This is a pointer to a stack limit. It is used to check the current stack pointer
     /// against. Can only appear once in a signature.
     StackLimit,
-}
 
-/// Text format names of the `ArgumentPurpose` variants.
-static PURPOSE_NAMES: [&str; 8] = [
-    "normal",
-    "sret",
-    "link",
-    "fp",
-    "csr",
-    "vmctx",
-    "sigid",
-    "stack_limit",
-];
+    /// A callee TLS value.
+    ///
+    /// In the Baldrdash-2020 calling convention, the stack upon entry to the callee contains the
+    /// TLS-register values for the caller and the callee. This argument is used to provide the
+    /// value for the callee.
+    CalleeTLS,
+
+    /// A caller TLS value.
+    ///
+    /// In the Baldrdash-2020 calling convention, the stack upon entry to the callee contains the
+    /// TLS-register values for the caller and the callee. This argument is used to provide the
+    /// value for the caller.
+    CallerTLS,
+}
 
 impl fmt::Display for ArgumentPurpose {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(PURPOSE_NAMES[*self as usize])
+        f.write_str(match self {
+            Self::Normal => "normal",
+            Self::StructArgument(size) => return write!(f, "sarg({})", size),
+            Self::StructReturn => "sret",
+            Self::Link => "link",
+            Self::FramePointer => "fp",
+            Self::CalleeSaved => "csr",
+            Self::VMContext => "vmctx",
+            Self::SignatureId => "sigid",
+            Self::StackLimit => "stack_limit",
+            Self::CalleeTLS => "callee_tls",
+            Self::CallerTLS => "caller_tls",
+        })
     }
 }
 
@@ -358,6 +343,14 @@ impl FromStr for ArgumentPurpose {
             "vmctx" => Ok(Self::VMContext),
             "sigid" => Ok(Self::SignatureId),
             "stack_limit" => Ok(Self::StackLimit),
+            _ if s.starts_with("sarg(") => {
+                if !s.ends_with(")") {
+                    return Err(());
+                }
+                // Parse 'sarg(size)'
+                let size: u32 = s["sarg(".len()..s.len() - 1].parse().map_err(|_| ())?;
+                Ok(Self::StructArgument(size))
+            }
             _ => Err(()),
         }
     }
@@ -367,6 +360,7 @@ impl FromStr for ArgumentPurpose {
 ///
 /// Information about a function that can be called directly with a direct `call` instruction.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct ExtFuncData {
     /// Name of the external function.
     pub name: ExternalName,
@@ -383,7 +377,7 @@ pub struct ExtFuncData {
     /// flag is best used when the target is known to be in the same unit of code generation, such
     /// as a Wasm module.
     ///
-    /// See the documentation for [`RelocDistance`](machinst::RelocDistance) for more details. A
+    /// See the documentation for [`RelocDistance`](crate::machinst::RelocDistance) for more details. A
     /// `colocated` flag value of `true` implies `RelocDistance::Near`.
     pub colocated: bool,
 }
@@ -430,16 +424,17 @@ mod tests {
     #[test]
     fn argument_purpose() {
         let all_purpose = [
-            ArgumentPurpose::Normal,
-            ArgumentPurpose::StructReturn,
-            ArgumentPurpose::Link,
-            ArgumentPurpose::FramePointer,
-            ArgumentPurpose::CalleeSaved,
-            ArgumentPurpose::VMContext,
-            ArgumentPurpose::SignatureId,
-            ArgumentPurpose::StackLimit,
+            (ArgumentPurpose::Normal, "normal"),
+            (ArgumentPurpose::StructReturn, "sret"),
+            (ArgumentPurpose::Link, "link"),
+            (ArgumentPurpose::FramePointer, "fp"),
+            (ArgumentPurpose::CalleeSaved, "csr"),
+            (ArgumentPurpose::VMContext, "vmctx"),
+            (ArgumentPurpose::SignatureId, "sigid"),
+            (ArgumentPurpose::StackLimit, "stack_limit"),
+            (ArgumentPurpose::StructArgument(42), "sarg(42)"),
         ];
-        for (&e, &n) in all_purpose.iter().zip(PURPOSE_NAMES.iter()) {
+        for &(e, n) in &all_purpose {
             assert_eq!(e.to_string(), n);
             assert_eq!(Ok(e), n.parse());
         }
@@ -454,6 +449,7 @@ mod tests {
             CallConv::WindowsFastcall,
             CallConv::BaldrdashSystemV,
             CallConv::BaldrdashWindows,
+            CallConv::Baldrdash2020,
         ] {
             assert_eq!(Ok(cc), cc.to_string().parse())
         }
@@ -473,16 +469,6 @@ mod tests {
         assert_eq!(
             sig.to_string(),
             "(i32, i32x4) -> f32, b8 baldrdash_system_v"
-        );
-
-        // Order does not matter.
-        sig.params[0].location = ArgumentLoc::Stack(24);
-        sig.params[1].location = ArgumentLoc::Stack(8);
-
-        // Writing ABI-annotated signatures.
-        assert_eq!(
-            sig.to_string(),
-            "(i32 [24], i32x4 [8]) -> f32, b8 baldrdash_system_v"
         );
     }
 }

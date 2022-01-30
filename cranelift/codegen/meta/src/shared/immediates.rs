@@ -64,49 +64,85 @@ pub(crate) struct Immediates {
     /// Flags for memory operations like `load` and `store`.
     pub memflags: OperandKind,
 
-    /// A register unit in the current target ISA.
-    pub regunit: OperandKind,
-
     /// A trap code indicating the reason for trapping.
     ///
     /// The Rust enum type also has a `User(u16)` variant for user-provided trap codes.
     pub trapcode: OperandKind,
+
+    /// A code indicating the arithmetic operation to perform in an atomic_rmw memory access.
+    pub atomic_rmw_op: OperandKind,
 }
 
-fn new_imm(format_field_name: &'static str, rust_type: &'static str) -> OperandKind {
-    OperandKind::new(format_field_name, rust_type, OperandKindFields::ImmValue)
+fn new_imm(
+    format_field_name: &'static str,
+    rust_type: &'static str,
+    doc: &'static str,
+) -> OperandKind {
+    OperandKind::new(
+        format_field_name,
+        rust_type,
+        OperandKindFields::ImmValue,
+        doc,
+    )
 }
 fn new_enum(
     format_field_name: &'static str,
     rust_type: &'static str,
     values: EnumValues,
+    doc: &'static str,
 ) -> OperandKind {
     OperandKind::new(
         format_field_name,
         rust_type,
         OperandKindFields::ImmEnum(values),
+        doc,
     )
 }
 
 impl Immediates {
     pub fn new() -> Self {
         Self {
-            imm64: new_imm("imm", "ir::immediates::Imm64").with_doc("A 64-bit immediate integer."),
-            uimm8: new_imm("imm", "ir::immediates::Uimm8")
-                .with_doc("An 8-bit immediate unsigned integer."),
-            uimm32: new_imm("imm", "ir::immediates::Uimm32")
-                .with_doc("A 32-bit immediate unsigned integer."),
-            uimm128: new_imm("imm", "ir::Immediate")
-                .with_doc("A 128-bit immediate unsigned integer."),
-            pool_constant: new_imm("constant_handle", "ir::Constant")
-                .with_doc("A constant stored in the constant pool."),
-            offset32: new_imm("offset", "ir::immediates::Offset32")
-                .with_doc("A 32-bit immediate signed offset."),
-            ieee32: new_imm("imm", "ir::immediates::Ieee32")
-                .with_doc("A 32-bit immediate floating point number."),
-            ieee64: new_imm("imm", "ir::immediates::Ieee64")
-                .with_doc("A 64-bit immediate floating point number."),
-            boolean: new_imm("imm", "bool").with_doc("An immediate boolean."),
+            imm64: new_imm(
+                "imm",
+                "ir::immediates::Imm64",
+                "A 64-bit immediate integer.",
+            ),
+            uimm8: new_imm(
+                "imm",
+                "ir::immediates::Uimm8",
+                "An 8-bit immediate unsigned integer.",
+            ),
+            uimm32: new_imm(
+                "imm",
+                "ir::immediates::Uimm32",
+                "A 32-bit immediate unsigned integer.",
+            ),
+            uimm128: new_imm(
+                "imm",
+                "ir::Immediate",
+                "A 128-bit immediate unsigned integer.",
+            ),
+            pool_constant: new_imm(
+                "constant_handle",
+                "ir::Constant",
+                "A constant stored in the constant pool.",
+            ),
+            offset32: new_imm(
+                "offset",
+                "ir::immediates::Offset32",
+                "A 32-bit immediate signed offset.",
+            ),
+            ieee32: new_imm(
+                "imm",
+                "ir::immediates::Ieee32",
+                "A 32-bit immediate floating point number.",
+            ),
+            ieee64: new_imm(
+                "imm",
+                "ir::immediates::Ieee64",
+                "A 64-bit immediate floating point number.",
+            ),
+            boolean: new_imm("imm", "bool", "An immediate boolean."),
             intcc: {
                 let mut intcc_values = HashMap::new();
                 intcc_values.insert("eq", "Equal");
@@ -121,8 +157,12 @@ impl Immediates {
                 intcc_values.insert("ult", "UnsignedLessThan");
                 intcc_values.insert("of", "Overflow");
                 intcc_values.insert("nof", "NotOverflow");
-                new_enum("cond", "ir::condcodes::IntCC", intcc_values)
-                    .with_doc("An integer comparison condition code.")
+                new_enum(
+                    "cond",
+                    "ir::condcodes::IntCC",
+                    intcc_values,
+                    "An integer comparison condition code.",
+                )
             },
 
             floatcc: {
@@ -141,20 +181,47 @@ impl Immediates {
                 floatcc_values.insert("ule", "UnorderedOrLessThanOrEqual");
                 floatcc_values.insert("ugt", "UnorderedOrGreaterThan");
                 floatcc_values.insert("uge", "UnorderedOrGreaterThanOrEqual");
-                new_enum("cond", "ir::condcodes::FloatCC", floatcc_values)
-                    .with_doc("A floating point comparison condition code")
+                new_enum(
+                    "cond",
+                    "ir::condcodes::FloatCC",
+                    floatcc_values,
+                    "A floating point comparison condition code",
+                )
             },
 
-            memflags: new_imm("flags", "ir::MemFlags").with_doc("Memory operation flags"),
-            regunit: new_imm("regunit", "isa::RegUnit")
-                .with_doc("A register unit in the target ISA"),
+            memflags: new_imm("flags", "ir::MemFlags", "Memory operation flags"),
             trapcode: {
                 let mut trapcode_values = HashMap::new();
                 trapcode_values.insert("stk_ovf", "StackOverflow");
                 trapcode_values.insert("heap_oob", "HeapOutOfBounds");
                 trapcode_values.insert("int_ovf", "IntegerOverflow");
                 trapcode_values.insert("int_divz", "IntegerDivisionByZero");
-                new_enum("code", "ir::TrapCode", trapcode_values).with_doc("A trap reason code.")
+                new_enum(
+                    "code",
+                    "ir::TrapCode",
+                    trapcode_values,
+                    "A trap reason code.",
+                )
+            },
+            atomic_rmw_op: {
+                let mut atomic_rmw_op_values = HashMap::new();
+                atomic_rmw_op_values.insert("add", "Add");
+                atomic_rmw_op_values.insert("sub", "Sub");
+                atomic_rmw_op_values.insert("and", "And");
+                atomic_rmw_op_values.insert("nand", "Nand");
+                atomic_rmw_op_values.insert("or", "Or");
+                atomic_rmw_op_values.insert("xor", "Xor");
+                atomic_rmw_op_values.insert("xchg", "Xchg");
+                atomic_rmw_op_values.insert("umin", "Umin");
+                atomic_rmw_op_values.insert("umax", "Umax");
+                atomic_rmw_op_values.insert("smin", "Smin");
+                atomic_rmw_op_values.insert("smax", "Smax");
+                new_enum(
+                    "op",
+                    "ir::AtomicRmwOp",
+                    atomic_rmw_op_values,
+                    "Atomic Read-Modify-Write Ops",
+                )
             },
         }
     }

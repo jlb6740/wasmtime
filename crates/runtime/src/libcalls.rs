@@ -57,12 +57,17 @@
 //!   ```
 
 use crate::externref::VMExternRef;
-use crate::table::Table;
-use crate::traphandlers::raise_lib_trap;
+use crate::instance::Instance;
+use crate::table::{Table, TableElementType};
+use crate::traphandlers::{raise_lib_trap, resume_panic, Trap};
 use crate::vmcontext::{VMCallerCheckedAnyfunc, VMContext};
-use wasmtime_environ::wasm::{
-    DataIndex, DefinedMemoryIndex, ElemIndex, MemoryIndex, TableElementType, TableIndex,
-};
+use backtrace::Backtrace;
+use std::mem;
+use std::ptr::{self, NonNull};
+use wasmtime_environ::{DataIndex, ElemIndex, GlobalIndex, MemoryIndex, TableIndex, TrapCode};
+
+const TOINT_32: f32 = 1.0 / f32::EPSILON;
+const TOINT_64: f64 = 1.0 / f64::EPSILON;
 
 /// Implementation of f32.ceil
 pub extern "C" fn wasmtime_f32_ceil(x: f32) -> f32 {
@@ -82,26 +87,25 @@ pub extern "C" fn wasmtime_f32_trunc(x: f32) -> f32 {
 /// Implementation of f32.nearest
 #[allow(clippy::float_arithmetic, clippy::float_cmp)]
 pub extern "C" fn wasmtime_f32_nearest(x: f32) -> f32 {
-    // Rust doesn't have a nearest function, so do it manually.
-    if x == 0.0 {
-        // Preserve the sign of zero.
+    // Rust doesn't have a nearest function; there's nearbyint, but it's not
+    // stabilized, so do it manually.
+    // Nearest is either ceil or floor depending on which is nearest or even.
+    // This approach exploited round half to even default mode.
+    let i = x.to_bits();
+    let e = i >> 23 & 0xff;
+    if e >= 0x7f_u32 + 23 {
+        // Check for NaNs.
+        if e == 0xff {
+            // Read the 23-bits significand.
+            if i & 0x7fffff != 0 {
+                // Ensure it's arithmetic by setting the significand's most
+                // significant bit to 1; it also works for canonical NaNs.
+                return f32::from_bits(i | (1 << 22));
+            }
+        }
         x
     } else {
-        // Nearest is either ceil or floor depending on which is nearest or even.
-        let u = x.ceil();
-        let d = x.floor();
-        let um = (x - u).abs();
-        let dm = (x - d).abs();
-        if um < dm
-            || (um == dm && {
-                let h = u / 2.;
-                h.floor() == h
-            })
-        {
-            u
-        } else {
-            d
-        }
+        (x.abs() + TOINT_32 - TOINT_32).copysign(x)
     }
 }
 
@@ -158,74 +162,46 @@ pub extern "C" fn wasmtime_f64_trunc(x: f64) -> f64 {
 /// Implementation of f64.nearest
 #[allow(clippy::float_arithmetic, clippy::float_cmp)]
 pub extern "C" fn wasmtime_f64_nearest(x: f64) -> f64 {
-    // Rust doesn't have a nearest function, so do it manually.
-    if x == 0.0 {
-        // Preserve the sign of zero.
+    // Rust doesn't have a nearest function; there's nearbyint, but it's not
+    // stabilized, so do it manually.
+    // Nearest is either ceil or floor depending on which is nearest or even.
+    // This approach exploited round half to even default mode.
+    let i = x.to_bits();
+    let e = i >> 52 & 0x7ff;
+    if e >= 0x3ff_u64 + 52 {
+        // Check for NaNs.
+        if e == 0x7ff {
+            // Read the 52-bits significand.
+            if i & 0xfffffffffffff != 0 {
+                // Ensure it's arithmetic by setting the significand's most
+                // significant bit to 1; it also works for canonical NaNs.
+                return f64::from_bits(i | (1 << 51));
+            }
+        }
         x
     } else {
-        // Nearest is either ceil or floor depending on which is nearest or even.
-        let u = x.ceil();
-        let d = x.floor();
-        let um = (x - u).abs();
-        let dm = (x - d).abs();
-        if um < dm
-            || (um == dm && {
-                let h = u / 2.;
-                h.floor() == h
-            })
-        {
-            u
-        } else {
-            d
-        }
+        (x.abs() + TOINT_64 - TOINT_64).copysign(x)
     }
 }
 
 /// Implementation of memory.grow for locally-defined 32-bit memories.
 pub unsafe extern "C" fn wasmtime_memory32_grow(
     vmctx: *mut VMContext,
-    delta: u32,
+    delta: u64,
     memory_index: u32,
-) -> u32 {
-    let instance = (&mut *vmctx).instance();
-    let memory_index = DefinedMemoryIndex::from_u32(memory_index);
-
-    instance
-        .memory_grow(memory_index, delta)
-        .unwrap_or(u32::max_value())
-}
-
-/// Implementation of memory.grow for imported 32-bit memories.
-pub unsafe extern "C" fn wasmtime_imported_memory32_grow(
-    vmctx: *mut VMContext,
-    delta: u32,
-    memory_index: u32,
-) -> u32 {
-    let instance = (&mut *vmctx).instance();
-    let memory_index = MemoryIndex::from_u32(memory_index);
-
-    instance
-        .imported_memory_grow(memory_index, delta)
-        .unwrap_or(u32::max_value())
-}
-
-/// Implementation of memory.size for locally-defined 32-bit memories.
-pub unsafe extern "C" fn wasmtime_memory32_size(vmctx: *mut VMContext, memory_index: u32) -> u32 {
-    let instance = (&mut *vmctx).instance();
-    let memory_index = DefinedMemoryIndex::from_u32(memory_index);
-
-    instance.memory_size(memory_index)
-}
-
-/// Implementation of memory.size for imported 32-bit memories.
-pub unsafe extern "C" fn wasmtime_imported_memory32_size(
-    vmctx: *mut VMContext,
-    memory_index: u32,
-) -> u32 {
-    let instance = (&mut *vmctx).instance();
-    let memory_index = MemoryIndex::from_u32(memory_index);
-
-    instance.imported_memory_size(memory_index)
+) -> usize {
+    // Memory grow can invoke user code provided in a ResourceLimiter{,Async},
+    // so we need to catch a possible panic
+    match std::panic::catch_unwind(|| {
+        let instance = (*vmctx).instance_mut();
+        let memory_index = MemoryIndex::from_u32(memory_index);
+        instance.memory_grow(memory_index, delta)
+    }) {
+        Ok(Ok(Some(size_in_bytes))) => size_in_bytes / (wasmtime_environ::WASM_PAGE_SIZE as usize),
+        Ok(Ok(None)) => usize::max_value(),
+        Ok(Err(err)) => crate::traphandlers::raise_user_trap(err),
+        Err(p) => resume_panic(p),
+    }
 }
 
 /// Implementation of `table.grow`.
@@ -237,28 +213,62 @@ pub unsafe extern "C" fn wasmtime_table_grow(
     // or is a `VMExternRef` until we look at the table type.
     init_value: *mut u8,
 ) -> u32 {
-    let instance = (&mut *vmctx).instance();
-    let table_index = TableIndex::from_u32(table_index);
-    match instance.table_element_type(table_index) {
-        TableElementType::Func => {
-            let func = init_value as *mut VMCallerCheckedAnyfunc;
-            instance
-                .table_grow(table_index, delta, func.into())
-                .unwrap_or(-1_i32 as u32)
-        }
-        TableElementType::Val(ty) => {
-            debug_assert_eq!(ty, crate::ref_type());
+    // Table grow can invoke user code provided in a ResourceLimiter{,Async},
+    // so we need to catch a possible panic
+    match std::panic::catch_unwind(|| {
+        let instance = (*vmctx).instance_mut();
+        let table_index = TableIndex::from_u32(table_index);
+        let element = match instance.table_element_type(table_index) {
+            TableElementType::Func => (init_value as *mut VMCallerCheckedAnyfunc).into(),
+            TableElementType::Extern => {
+                let init_value = if init_value.is_null() {
+                    None
+                } else {
+                    Some(VMExternRef::clone_from_raw(init_value))
+                };
+                init_value.into()
+            }
+        };
+        instance.table_grow(table_index, delta, element)
+    }) {
+        Ok(Ok(Some(r))) => r,
+        Ok(Ok(None)) => -1_i32 as u32,
+        Ok(Err(err)) => crate::traphandlers::raise_user_trap(err),
+        Err(p) => resume_panic(p),
+    }
+}
 
-            let init_value = if init_value.is_null() {
-                None
-            } else {
-                Some(VMExternRef::clone_from_raw(init_value))
-            };
-
-            instance
-                .table_grow(table_index, delta, init_value.into())
-                .unwrap_or(-1_i32 as u32)
+/// Implementation of `table.fill`.
+pub unsafe extern "C" fn wasmtime_table_fill(
+    vmctx: *mut VMContext,
+    table_index: u32,
+    dst: u32,
+    // NB: we don't know whether this is a `VMExternRef` or a pointer to a
+    // `VMCallerCheckedAnyfunc` until we look at the table's element type.
+    val: *mut u8,
+    len: u32,
+) {
+    let result = {
+        let instance = (*vmctx).instance_mut();
+        let table_index = TableIndex::from_u32(table_index);
+        let table = &mut *instance.get_table(table_index);
+        match table.element_type() {
+            TableElementType::Func => {
+                let val = val as *mut VMCallerCheckedAnyfunc;
+                table.fill(dst, val.into(), len)
+            }
+            TableElementType::Extern => {
+                let val = if val.is_null() {
+                    None
+                } else {
+                    Some(VMExternRef::clone_from_raw(val))
+                };
+                table.fill(dst, val.into(), len)
+            }
         }
+    };
+    if let Err(trap) = result {
+        raise_lib_trap(trap);
     }
 }
 
@@ -274,7 +284,7 @@ pub unsafe extern "C" fn wasmtime_table_copy(
     let result = {
         let dst_table_index = TableIndex::from_u32(dst_table_index);
         let src_table_index = TableIndex::from_u32(src_table_index);
-        let instance = (&mut *vmctx).instance();
+        let instance = (*vmctx).instance_mut();
         let dst_table = instance.get_table(dst_table_index);
         let src_table = instance.get_table(src_table_index);
         Table::copy(dst_table, src_table, dst, src, len)
@@ -296,7 +306,7 @@ pub unsafe extern "C" fn wasmtime_table_init(
     let result = {
         let table_index = TableIndex::from_u32(table_index);
         let elem_index = ElemIndex::from_u32(elem_index);
-        let instance = (&mut *vmctx).instance();
+        let instance = (*vmctx).instance_mut();
         instance.table_init(table_index, elem_index, dst, src, len)
     };
     if let Err(trap) = result {
@@ -307,40 +317,24 @@ pub unsafe extern "C" fn wasmtime_table_init(
 /// Implementation of `elem.drop`.
 pub unsafe extern "C" fn wasmtime_elem_drop(vmctx: *mut VMContext, elem_index: u32) {
     let elem_index = ElemIndex::from_u32(elem_index);
-    let instance = (&mut *vmctx).instance();
+    let instance = (*vmctx).instance_mut();
     instance.elem_drop(elem_index);
 }
 
 /// Implementation of `memory.copy` for locally defined memories.
-pub unsafe extern "C" fn wasmtime_defined_memory_copy(
+pub unsafe extern "C" fn wasmtime_memory_copy(
     vmctx: *mut VMContext,
-    memory_index: u32,
-    dst: u32,
-    src: u32,
-    len: u32,
+    dst_index: u32,
+    dst: u64,
+    src_index: u32,
+    src: u64,
+    len: u64,
 ) {
     let result = {
-        let memory_index = DefinedMemoryIndex::from_u32(memory_index);
-        let instance = (&mut *vmctx).instance();
-        instance.defined_memory_copy(memory_index, dst, src, len)
-    };
-    if let Err(trap) = result {
-        raise_lib_trap(trap);
-    }
-}
-
-/// Implementation of `memory.copy` for imported memories.
-pub unsafe extern "C" fn wasmtime_imported_memory_copy(
-    vmctx: *mut VMContext,
-    memory_index: u32,
-    dst: u32,
-    src: u32,
-    len: u32,
-) {
-    let result = {
-        let memory_index = MemoryIndex::from_u32(memory_index);
-        let instance = (&mut *vmctx).instance();
-        instance.imported_memory_copy(memory_index, dst, src, len)
+        let src_index = MemoryIndex::from_u32(src_index);
+        let dst_index = MemoryIndex::from_u32(dst_index);
+        let instance = (*vmctx).instance_mut();
+        instance.memory_copy(dst_index, dst, src_index, src, len)
     };
     if let Err(trap) = result {
         raise_lib_trap(trap);
@@ -351,32 +345,14 @@ pub unsafe extern "C" fn wasmtime_imported_memory_copy(
 pub unsafe extern "C" fn wasmtime_memory_fill(
     vmctx: *mut VMContext,
     memory_index: u32,
-    dst: u32,
+    dst: u64,
     val: u32,
-    len: u32,
-) {
-    let result = {
-        let memory_index = DefinedMemoryIndex::from_u32(memory_index);
-        let instance = (&mut *vmctx).instance();
-        instance.defined_memory_fill(memory_index, dst, val, len)
-    };
-    if let Err(trap) = result {
-        raise_lib_trap(trap);
-    }
-}
-
-/// Implementation of `memory.fill` for imported memories.
-pub unsafe extern "C" fn wasmtime_imported_memory_fill(
-    vmctx: *mut VMContext,
-    memory_index: u32,
-    dst: u32,
-    val: u32,
-    len: u32,
+    len: u64,
 ) {
     let result = {
         let memory_index = MemoryIndex::from_u32(memory_index);
-        let instance = (&mut *vmctx).instance();
-        instance.imported_memory_fill(memory_index, dst, val, len)
+        let instance = (*vmctx).instance_mut();
+        instance.memory_fill(memory_index, dst, val as u8, len)
     };
     if let Err(trap) = result {
         raise_lib_trap(trap);
@@ -388,14 +364,14 @@ pub unsafe extern "C" fn wasmtime_memory_init(
     vmctx: *mut VMContext,
     memory_index: u32,
     data_index: u32,
-    dst: u32,
+    dst: u64,
     src: u32,
     len: u32,
 ) {
     let result = {
         let memory_index = MemoryIndex::from_u32(memory_index);
         let data_index = DataIndex::from_u32(data_index);
-        let instance = (&mut *vmctx).instance();
+        let instance = (*vmctx).instance_mut();
         instance.memory_init(memory_index, data_index, dst, src, len)
     };
     if let Err(trap) = result {
@@ -406,6 +382,186 @@ pub unsafe extern "C" fn wasmtime_memory_init(
 /// Implementation of `data.drop`.
 pub unsafe extern "C" fn wasmtime_data_drop(vmctx: *mut VMContext, data_index: u32) {
     let data_index = DataIndex::from_u32(data_index);
-    let instance = (&mut *vmctx).instance();
+    let instance = (*vmctx).instance_mut();
     instance.data_drop(data_index)
+}
+
+/// Drop a `VMExternRef`.
+pub unsafe extern "C" fn wasmtime_drop_externref(externref: *mut u8) {
+    let externref = externref as *mut crate::externref::VMExternData;
+    let externref = NonNull::new(externref).unwrap();
+    crate::externref::VMExternData::drop_and_dealloc(externref);
+}
+
+/// Do a GC and insert the given `externref` into the
+/// `VMExternRefActivationsTable`.
+pub unsafe extern "C" fn wasmtime_activations_table_insert_with_gc(
+    vmctx: *mut VMContext,
+    externref: *mut u8,
+) {
+    let externref = VMExternRef::clone_from_raw(externref);
+    let instance = (*vmctx).instance();
+    let (activations_table, module_info_lookup) = (*instance.store()).externref_activations_table();
+    activations_table.insert_with_gc(externref, module_info_lookup);
+}
+
+/// Perform a Wasm `global.get` for `externref` globals.
+pub unsafe extern "C" fn wasmtime_externref_global_get(
+    vmctx: *mut VMContext,
+    index: u32,
+) -> *mut u8 {
+    let index = GlobalIndex::from_u32(index);
+    let instance = (*vmctx).instance();
+    let global = instance.defined_or_imported_global_ptr(index);
+    match (*global).as_externref().clone() {
+        None => ptr::null_mut(),
+        Some(externref) => {
+            let raw = externref.as_raw();
+            let (activations_table, module_info_lookup) =
+                (*instance.store()).externref_activations_table();
+            activations_table.insert_with_gc(externref, module_info_lookup);
+            raw
+        }
+    }
+}
+
+/// Perform a Wasm `global.set` for `externref` globals.
+pub unsafe extern "C" fn wasmtime_externref_global_set(
+    vmctx: *mut VMContext,
+    index: u32,
+    externref: *mut u8,
+) {
+    let externref = if externref.is_null() {
+        None
+    } else {
+        Some(VMExternRef::clone_from_raw(externref))
+    };
+
+    let index = GlobalIndex::from_u32(index);
+    let instance = (*vmctx).instance();
+    let global = instance.defined_or_imported_global_ptr(index);
+
+    // Swap the new `externref` value into the global before we drop the old
+    // value. This protects against an `externref` with a `Drop` implementation
+    // that calls back into Wasm and touches this global again (we want to avoid
+    // it observing a halfway-deinitialized value).
+    let old = mem::replace((*global).as_externref_mut(), externref);
+    drop(old);
+}
+
+/// Implementation of `memory.atomic.notify` for locally defined memories.
+pub unsafe extern "C" fn wasmtime_memory_atomic_notify(
+    vmctx: *mut VMContext,
+    memory_index: u32,
+    addr: usize,
+    _count: u32,
+) -> u32 {
+    let result = {
+        let memory = MemoryIndex::from_u32(memory_index);
+        let instance = (*vmctx).instance();
+        // this should never overflow since addr + 4 either hits a guard page
+        // or it's been validated to be in-bounds already. Double-check for now
+        // just to be sure.
+        let addr_to_check = addr.checked_add(4).unwrap();
+        validate_atomic_addr(instance, memory, addr_to_check).and_then(|()| {
+            Err(Trap::User(anyhow::anyhow!(
+                "unimplemented: wasm atomics (fn wasmtime_memory_atomic_notify) unsupported",
+            )))
+        })
+    };
+    match result {
+        Ok(n) => n,
+        Err(e) => raise_lib_trap(e),
+    }
+}
+
+/// Implementation of `memory.atomic.wait32` for locally defined memories.
+pub unsafe extern "C" fn wasmtime_memory_atomic_wait32(
+    vmctx: *mut VMContext,
+    memory_index: u32,
+    addr: usize,
+    _expected: u32,
+    _timeout: u64,
+) -> u32 {
+    let result = {
+        let memory = MemoryIndex::from_u32(memory_index);
+        let instance = (*vmctx).instance();
+        // see wasmtime_memory_atomic_notify for why this shouldn't overflow
+        // but we still double-check
+        let addr_to_check = addr.checked_add(4).unwrap();
+        validate_atomic_addr(instance, memory, addr_to_check).and_then(|()| {
+            Err(Trap::User(anyhow::anyhow!(
+                "unimplemented: wasm atomics (fn wasmtime_memory_atomic_wait32) unsupported",
+            )))
+        })
+    };
+    match result {
+        Ok(n) => n,
+        Err(e) => raise_lib_trap(e),
+    }
+}
+
+/// Implementation of `memory.atomic.wait64` for locally defined memories.
+pub unsafe extern "C" fn wasmtime_memory_atomic_wait64(
+    vmctx: *mut VMContext,
+    memory_index: u32,
+    addr: usize,
+    _expected: u64,
+    _timeout: u64,
+) -> u32 {
+    let result = {
+        let memory = MemoryIndex::from_u32(memory_index);
+        let instance = (*vmctx).instance();
+        // see wasmtime_memory_atomic_notify for why this shouldn't overflow
+        // but we still double-check
+        let addr_to_check = addr.checked_add(8).unwrap();
+        validate_atomic_addr(instance, memory, addr_to_check).and_then(|()| {
+            Err(Trap::User(anyhow::anyhow!(
+                "unimplemented: wasm atomics (fn wasmtime_memory_atomic_wait64) unsupported",
+            )))
+        })
+    };
+    match result {
+        Ok(n) => n,
+        Err(e) => raise_lib_trap(e),
+    }
+}
+
+/// For atomic operations we still check the actual address despite this also
+/// being checked via the `heap_addr` instruction in cranelift. The reason for
+/// that is because the `heap_addr` instruction can defer to a later segfault to
+/// actually recognize the out-of-bounds whereas once we're running Rust code
+/// here we don't want to segfault.
+///
+/// In the situations where bounds checks were elided in JIT code (because oob
+/// would then be later guaranteed to segfault) this manual check is here
+/// so we don't segfault from Rust.
+unsafe fn validate_atomic_addr(
+    instance: &Instance,
+    memory: MemoryIndex,
+    addr: usize,
+) -> Result<(), Trap> {
+    if addr > instance.get_memory(memory).current_length {
+        return Err(Trap::Wasm {
+            trap_code: TrapCode::HeapOutOfBounds,
+            backtrace: Backtrace::new_unresolved(),
+        });
+    }
+    Ok(())
+}
+
+/// Hook for when an instance runs out of fuel.
+pub unsafe extern "C" fn wasmtime_out_of_gas(vmctx: *mut VMContext) {
+    match (*(*vmctx).instance().store()).out_of_gas() {
+        Ok(()) => {}
+        Err(err) => crate::traphandlers::raise_user_trap(err),
+    }
+}
+
+/// Hook for when an instance observes that the epoch has changed.
+pub unsafe extern "C" fn wasmtime_new_epoch(vmctx: *mut VMContext) -> u64 {
+    match (*(*vmctx).instance().store()).new_epoch() {
+        Ok(new_deadline) => new_deadline,
+        Err(err) => crate::traphandlers::raise_user_trap(err),
+    }
 }

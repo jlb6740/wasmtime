@@ -5,7 +5,6 @@ use crate::dominator_tree::DominatorTree;
 use crate::flowgraph::ControlFlowGraph;
 use crate::ir;
 use crate::timing;
-use log::debug;
 
 /// Eliminate unreachable code.
 ///
@@ -25,14 +24,14 @@ pub fn eliminate_unreachable_code(
             continue;
         }
 
-        debug!("Eliminating unreachable {}", block);
+        log::trace!("Eliminating unreachable {}", block);
         // Move the cursor out of the way and make sure the next lop iteration goes to the right
         // block.
         pos.prev_block();
 
         // Remove all instructions from `block`.
         while let Some(inst) = pos.func.layout.first_inst(block) {
-            debug!(" - {}", pos.func.dfg.display_inst(inst, None));
+            log::trace!(" - {}", pos.func.dfg.display_inst(inst));
             pos.func.layout.remove_inst(inst);
         }
 
@@ -42,5 +41,18 @@ pub fn eliminate_unreachable_code(
 
         // Finally, remove the block from the layout.
         pos.func.layout.remove_block(block);
+    }
+
+    // Remove all jumptable block-list contents that refer to unreachable
+    // blocks; the jumptable itself must have been unused (or used only in an
+    // unreachable block) if so. Note that we are not necessarily removing *all*
+    // unused jumptables, because that would require computing their
+    // reachability as well; we are just removing enough to clean up references
+    // to deleted blocks.
+    for jt_data in func.jump_tables.values_mut() {
+        let invalid_ref = jt_data.iter().any(|block| !domtree.is_reachable(*block));
+        if invalid_ref {
+            jt_data.clear();
+        }
     }
 }

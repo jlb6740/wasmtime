@@ -3,18 +3,20 @@ use wiggle::GuestMemory;
 use wiggle_test::{impl_errno, HostMemory, MemArea, WasiCtx};
 
 wiggle::from_witx!({
-    witx: ["tests/atoms.witx"],
-    ctx: WasiCtx,
+    witx: ["$CARGO_MANIFEST_DIR/tests/atoms.witx"],
 });
 
-impl_errno!(types::Errno, types::GuestErrorConversion);
+impl_errno!(types::Errno);
 
 impl<'a> atoms::Atoms for WasiCtx<'a> {
-    fn int_float_args(&self, an_int: u32, an_float: f32) -> Result<(), types::Errno> {
+    fn int_float_args(&mut self, an_int: u32, an_float: f32) -> Result<(), types::Errno> {
         println!("INT FLOAT ARGS: {} {}", an_int, an_float);
         Ok(())
     }
-    fn double_int_return_float(&self, an_int: u32) -> Result<types::AliasToFloat, types::Errno> {
+    fn double_int_return_float(
+        &mut self,
+        an_int: u32,
+    ) -> Result<types::AliasToFloat, types::Errno> {
         Ok((an_int as f32) * 2.0)
     }
 }
@@ -29,12 +31,12 @@ struct IntFloatExercise {
 
 impl IntFloatExercise {
     pub fn test(&self) {
-        let ctx = WasiCtx::new();
+        let mut ctx = WasiCtx::new();
         let host_memory = HostMemory::new();
 
-        let e = atoms::int_float_args(&ctx, &host_memory, self.an_int as i32, self.an_float);
+        let e = atoms::int_float_args(&mut ctx, &host_memory, self.an_int as i32, self.an_float);
 
-        assert_eq!(e, types::Errno::Ok.into(), "int_float_args error");
+        assert_eq!(e, Ok(types::Errno::Ok as i32), "int_float_args error");
     }
 
     pub fn strat() -> BoxedStrategy<Self> {
@@ -58,11 +60,11 @@ struct DoubleIntExercise {
 
 impl DoubleIntExercise {
     pub fn test(&self) {
-        let ctx = WasiCtx::new();
+        let mut ctx = WasiCtx::new();
         let host_memory = HostMemory::new();
 
         let e = atoms::double_int_return_float(
-            &ctx,
+            &mut ctx,
             &host_memory,
             self.input as i32,
             self.return_loc.ptr as i32,
@@ -72,7 +74,7 @@ impl DoubleIntExercise {
             .ptr::<types::AliasToFloat>(self.return_loc.ptr)
             .read()
             .expect("failed to read return");
-        assert_eq!(e, types::Errno::Ok.into(), "errno");
+        assert_eq!(e, Ok(types::Errno::Ok as i32), "errno");
         assert_eq!(return_val, (self.input as f32) * 2.0, "return val");
     }
 

@@ -14,13 +14,13 @@ fn same_import_names_still_distinct() -> anyhow::Result<()> {
 )
     "#;
 
-    let store = Store::default();
+    let mut store = Store::<()>::default();
     let module = Module::new(store.engine(), WAT)?;
 
     let imports = [
         Func::new(
-            &store,
-            FuncType::new(Box::new([]), Box::new([ValType::I32])),
+            &mut store,
+            FuncType::new(None, Some(ValType::I32)),
             |_, params, results| {
                 assert!(params.is_empty());
                 assert_eq!(results.len(), 1);
@@ -30,8 +30,8 @@ fn same_import_names_still_distinct() -> anyhow::Result<()> {
         )
         .into(),
         Func::new(
-            &store,
-            FuncType::new(Box::new([]), Box::new([ValType::F32])),
+            &mut store,
+            FuncType::new(None, Some(ValType::F32)),
             |_, params, results| {
                 assert!(params.is_empty());
                 assert_eq!(results.len(), 1);
@@ -41,14 +41,10 @@ fn same_import_names_still_distinct() -> anyhow::Result<()> {
         )
         .into(),
     ];
-    let instance = Instance::new(&store, &module, &imports)?;
+    let instance = Instance::new(&mut store, &module, &imports)?;
 
-    let func = instance.get_func("foo").unwrap();
-    let results = func.call(&[])?;
-    assert_eq!(results.len(), 1);
-    match results[0] {
-        Val::I32(n) => assert_eq!(n, 3),
-        _ => panic!("unexpected type of return"),
-    }
+    let func = instance.get_typed_func::<(), i32, _>(&mut store, "foo")?;
+    let result = func.call(&mut store, ())?;
+    assert_eq!(result, 3);
     Ok(())
 }

@@ -156,7 +156,7 @@
 //!
 //! let flags = settings::Flags::new(settings::builder());
 //! let res = verify_function(&func, &flags);
-//! println!("{}", func.display(None));
+//! println!("{}", func.display());
 //! if let Err(errors) = res {
 //!     panic!("{}", errors);
 //! }
@@ -172,9 +172,8 @@
         clippy::float_arithmetic,
         clippy::mut_mut,
         clippy::nonminimal_bool,
-        clippy::option_map_unwrap_or,
-        clippy::option_map_unwrap_or_else,
-        clippy::print_stdout,
+        clippy::map_unwrap_or,
+        clippy::clippy::print_stdout,
         clippy::unicode_not_nfc,
         clippy::use_self
     )

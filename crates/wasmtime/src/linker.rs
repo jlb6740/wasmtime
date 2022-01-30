@@ -1,23 +1,32 @@
+use crate::func::HostFunc;
+use crate::instance::{InstanceData, InstancePre};
+use crate::store::StoreOpaque;
 use crate::{
-    Extern, ExternType, Func, FuncType, GlobalType, ImportType, Instance, IntoFunc, Module, Store,
-    Trap,
+    AsContextMut, Caller, Engine, Extern, ExternType, Func, FuncType, ImportType, Instance,
+    IntoFunc, Module, StoreContextMut, Trap, Val, ValRaw,
 };
-use anyhow::{anyhow, bail, Context, Error, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use log::warn;
 use std::collections::hash_map::{Entry, HashMap};
-use std::rc::Rc;
+#[cfg(feature = "async")]
+use std::future::Future;
+use std::marker;
+#[cfg(feature = "async")]
+use std::pin::Pin;
+use std::sync::Arc;
 
 /// Structure used to link wasm modules/instances together.
 ///
-/// This structure is used to assist in instantiating a [`Module`]. A `Linker`
+/// This structure is used to assist in instantiating a [`Module`]. A [`Linker`]
 /// is a way of performing name resolution to make instantiating a module easier
-/// (as opposed to calling [`Instance::new`]). `Linker` is a name-based resolver
-/// where names are dynamically defined and then used to instantiate a
-/// [`Module`]. The goal of a `Linker` is to have a one-argument method,
-/// [`Linker::instantiate`], which takes a [`Module`] and produces an
-/// [`Instance`].  This method will automatically select all the right imports
-/// for the [`Module`] to be instantiated, and will otherwise return an error
-/// if an import isn't satisfied.
+/// than specifying positional imports to [`Instance::new`]. [`Linker`] is a
+/// name-based resolver where names are dynamically defined and then used to
+/// instantiate a [`Module`].
+///
+/// An important method is [`Linker::instantiate`] which takes a module to
+/// instantiate into the provided store. This method will automatically select
+/// all the right imports for the [`Module`] to be instantiated, and will
+/// otherwise return an error if an import isn't satisfied.
 ///
 /// ## Name Resolution
 ///
@@ -28,63 +37,148 @@ use std::rc::Rc;
 /// module and then has its own name. This basically follows the wasm standard
 /// for modularization.
 ///
-/// Names in a `Linker` can be defined twice, but only for different signatures
-/// of items. This means that every item defined in a `Linker` has a unique
-/// name/type pair. For example you can define two functions with the module
-/// name `foo` and item name `bar`, so long as they have different function
-/// signatures. Currently duplicate memories and tables are not allowed, only
-/// one-per-name is allowed.
+/// Names in a `Linker` cannot be defined twice, but allowing duplicates by
+/// shadowing the previous definition can be controlled with the
+/// [`Linker::allow_shadowing`] method.
 ///
-/// Note that allowing duplicates by shadowing the previous definition can be
-/// controlled with the [`Linker::allow_shadowing`] method as well.
-pub struct Linker {
-    store: Store,
-    string2idx: HashMap<Rc<str>, usize>,
-    strings: Vec<Rc<str>>,
-    map: HashMap<ImportKey, Extern>,
+/// ## Commands and Reactors
+///
+/// The [`Linker`] type provides conveniences for working with WASI Commands and
+/// Reactors through the [`Linker::module`] method. This will automatically
+/// handle instantiation and calling `_start` and such as appropriate
+/// depending on the inferred type of module.
+///
+/// ## Type parameter `T`
+///
+/// It's worth pointing out that the type parameter `T` on [`Linker<T>`] does
+/// not represent that `T` is stored within a [`Linker`]. Rather the `T` is used
+/// to ensure that linker-defined functions and stores instantiated into all use
+/// the same matching `T` as host state.
+///
+/// ## Multiple `Store`s
+///
+/// The [`Linker`] type is designed to be compatible, in some scenarios, with
+/// instantiation in multiple [`Store`]s. Specifically host-defined functions
+/// created in [`Linker`] with [`Linker::func_new`], [`Linker::func_wrap`], and
+/// their async versions are compatible to instantiate into any [`Store`]. This
+/// enables programs which want to instantiate lots of modules to create one
+/// [`Linker`] value at program start up and use that continuously for each
+/// [`Store`] created over the lifetime of the program.
+///
+/// Note that once [`Store`]-owned items, such as [`Global`], are defined witin
+/// a [`Linker`] then it is no longer compatible with any [`Store`]. At that
+/// point only the [`Store`] that owns the [`Global`] can be used to instantiate
+/// modules.
+///
+/// ## Multiple `Engine`s
+///
+/// The [`Linker`] type is not compatible with usage between multiple [`Engine`]
+/// values. An [`Engine`] is provided when a [`Linker`] is created and only
+/// stores and items which originate from that [`Engine`] can be used with this
+/// [`Linker`]. If more than one [`Engine`] is used with a [`Linker`] then that
+/// may cause a panic at runtime, similar to how if a [`Func`] is used with the
+/// wrong [`Store`] that can also panic at runtime.
+///
+/// [`Store`]: crate::Store
+/// [`Global`]: crate::Global
+pub struct Linker<T> {
+    engine: Engine,
+    string2idx: HashMap<Arc<str>, usize>,
+    strings: Vec<Arc<str>>,
+    map: HashMap<ImportKey, Definition>,
     allow_shadowing: bool,
+    allow_unknown_exports: bool,
+    _marker: marker::PhantomData<fn() -> T>,
 }
 
-#[derive(Hash, PartialEq, Eq)]
+impl<T> Clone for Linker<T> {
+    fn clone(&self) -> Linker<T> {
+        Linker {
+            engine: self.engine.clone(),
+            string2idx: self.string2idx.clone(),
+            strings: self.strings.clone(),
+            map: self.map.clone(),
+            allow_shadowing: self.allow_shadowing,
+            allow_unknown_exports: self.allow_unknown_exports,
+            _marker: self._marker,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Hash, PartialEq, Eq)]
 struct ImportKey {
     name: usize,
     module: usize,
-    kind: ImportKind,
 }
 
-#[derive(Hash, PartialEq, Eq, Debug)]
-enum ImportKind {
-    Func(FuncType),
-    Global(GlobalType),
-    Memory,
-    Table,
+#[derive(Clone)]
+pub(crate) enum Definition {
+    Extern(Extern),
+    HostFunc(Arc<HostFunc>),
+    Instance(Arc<indexmap::IndexMap<String, Definition>>),
 }
 
-impl Linker {
+macro_rules! generate_wrap_async_func {
+    ($num:tt $($args:ident)*) => (paste::paste!{
+        /// Asynchronous analog of [`Linker::func_wrap`].
+        ///
+        /// For more information also see
+        /// [`Func::wrapN_async`](crate::Func::wrap1_async).
+        #[allow(non_snake_case)]
+        #[cfg(feature = "async")]
+        #[cfg_attr(nightlydoc, doc(cfg(feature = "async")))]
+        pub fn [<func_wrap $num _async>]<$($args,)* R>(
+            &mut self,
+            module: &str,
+            name: &str,
+            func: impl for<'a> Fn(Caller<'a, T>, $($args),*) -> Box<dyn Future<Output = R> + Send + 'a> + Send + Sync + 'static,
+        ) -> Result<&mut Self>
+        where
+            $($args: crate::WasmTy,)*
+            R: crate::WasmRet,
+        {
+            assert!(
+                self.engine.config().async_support,
+                concat!(
+                    "cannot use `func_wrap",
+                    $num,
+                    "_async` without enabling async support on the config",
+                ),
+            );
+            self.func_wrap(module, name, move |mut caller: Caller<'_, T>, $($args: $args),*| {
+                let async_cx = caller.store.as_context_mut().0.async_cx();
+                let mut future = Pin::from(func(caller, $($args),*));
+                match unsafe { async_cx.block_on(future.as_mut()) } {
+                    Ok(ret) => ret.into_fallible(),
+                    Err(e) => R::fallible_from_trap(e),
+                }
+            })
+        }
+    })
+}
+
+impl<T> Linker<T> {
     /// Creates a new [`Linker`].
     ///
-    /// This function will create a new [`Linker`] which is ready to start
-    /// linking modules. All items defined in this linker and produced by this
-    /// linker will be connected with `store` and must come from the same
-    /// `store`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use wasmtime::{Linker, Store};
-    ///
-    /// let store = Store::default();
-    /// let mut linker = Linker::new(&store);
-    /// // ...
-    /// ```
-    pub fn new(store: &Store) -> Linker {
+    /// The linker will define functions within the context of the `engine`
+    /// provided and can only instantiate modules for a [`Store`][crate::Store]
+    /// that is also defined within the same [`Engine`]. Usage of stores with
+    /// different [`Engine`]s may cause a panic when used with this [`Linker`].
+    pub fn new(engine: &Engine) -> Linker<T> {
         Linker {
-            store: store.clone(),
+            engine: engine.clone(),
             map: HashMap::new(),
             string2idx: HashMap::new(),
             strings: Vec::new(),
             allow_shadowing: false,
+            allow_unknown_exports: false,
+            _marker: marker::PhantomData,
         }
+    }
+
+    /// Returns the [`Engine`] this is connected to.
+    pub fn engine(&self) -> &Engine {
+        &self.engine
     }
 
     /// Configures whether this [`Linker`] will shadow previous duplicate
@@ -99,21 +193,48 @@ impl Linker {
     /// ```
     /// # use wasmtime::*;
     /// # fn main() -> anyhow::Result<()> {
-    /// # let store = Store::default();
-    /// let mut linker = Linker::new(&store);
-    /// linker.func("", "", || {})?;
+    /// # let engine = Engine::default();
+    /// let mut linker = Linker::<()>::new(&engine);
+    /// linker.func_wrap("", "", || {})?;
     ///
     /// // by default, duplicates are disallowed
-    /// assert!(linker.func("", "", || {}).is_err());
+    /// assert!(linker.func_wrap("", "", || {}).is_err());
     ///
     /// // but shadowing can be configured to be allowed as well
     /// linker.allow_shadowing(true);
-    /// linker.func("", "", || {})?;
+    /// linker.func_wrap("", "", || {})?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn allow_shadowing(&mut self, allow: bool) -> &mut Linker {
+    pub fn allow_shadowing(&mut self, allow: bool) -> &mut Self {
         self.allow_shadowing = allow;
+        self
+    }
+
+    /// Configures whether this [`Linker`] will allow unknown exports from
+    /// command modules.
+    ///
+    /// By default a [`Linker`] will error when unknown exports are encountered
+    /// in a command module while using [`Linker::module`].
+    ///
+    /// This method can be used to allow unknown exports from command modules.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use wasmtime::*;
+    /// # fn main() -> anyhow::Result<()> {
+    /// # let engine = Engine::default();
+    /// # let module = Module::new(&engine, "(module)")?;
+    /// # let mut store = Store::new(&engine, ());
+    /// let mut linker = Linker::new(&engine);
+    /// linker.allow_unknown_exports(true);
+    /// linker.module(&mut store, "mod", &module)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn allow_unknown_exports(&mut self, allow: bool) -> &mut Self {
+        self.allow_unknown_exports = allow;
         self
     }
 
@@ -129,18 +250,16 @@ impl Linker {
     /// of the same type as the `item` provided and if shadowing is disallowed.
     /// For more information see the documentation on [`Linker`].
     ///
-    /// Also returns an error if `item` comes from a different store than this
-    /// [`Linker`] was created with.
-    ///
     /// # Examples
     ///
     /// ```
     /// # use wasmtime::*;
     /// # fn main() -> anyhow::Result<()> {
-    /// # let store = Store::default();
-    /// let mut linker = Linker::new(&store);
+    /// # let engine = Engine::default();
+    /// # let mut store = Store::new(&engine, ());
+    /// let mut linker = Linker::new(&engine);
     /// let ty = GlobalType::new(ValType::I32, Mutability::Const);
-    /// let global = Global::new(&store, ty, Val::I32(0x1234))?;
+    /// let global = Global::new(&mut store, ty, Val::I32(0x1234))?;
     /// linker.define("host", "offset", global)?;
     ///
     /// let wat = r#"
@@ -150,8 +269,8 @@ impl Linker {
     ///         (data (global.get 0) "foo")
     ///     )
     /// "#;
-    /// let module = Module::new(store.engine(), wat)?;
-    /// linker.instantiate(&module)?;
+    /// let module = Module::new(&engine, wat)?;
+    /// linker.instantiate(&mut store, &module)?;
     /// # Ok(())
     /// # }
     /// ```
@@ -161,21 +280,114 @@ impl Linker {
         name: &str,
         item: impl Into<Extern>,
     ) -> Result<&mut Self> {
-        self._define(module, name, item.into())
-    }
-
-    fn _define(&mut self, module: &str, name: &str, item: Extern) -> Result<&mut Self> {
-        if !item.comes_from_same_store(&self.store) {
-            bail!("all linker items must be from the same store");
-        }
-        self.insert(module, name, item)?;
+        let key = self.import_key(module, Some(name));
+        self.insert(key, Definition::Extern(item.into()))?;
         Ok(self)
     }
 
-    /// Convenience wrapper to define a function import.
+    /// Same as [`Linker::define`], except only the name of the import is
+    /// provided, not a module name as well.
     ///
-    /// This method is a convenience wrapper around [`Linker::define`] which
-    /// internally delegates to [`Func::wrap`].
+    /// This is only relevant when working with the module linking proposal
+    /// where one-level names are allowed (in addition to two-level names).
+    /// Otherwise this method need not be used.
+    pub fn define_name(&mut self, name: &str, item: impl Into<Extern>) -> Result<&mut Self> {
+        let key = self.import_key(name, None);
+        self.insert(key, Definition::Extern(item.into()))?;
+        Ok(self)
+    }
+
+    /// Creates a [`Func::new`]-style function named in this linker.
+    ///
+    /// For more information see [`Linker::func_wrap`].
+    #[cfg(compiler)]
+    #[cfg_attr(nightlydoc, doc(cfg(feature = "cranelift")))] // see build.rs
+    pub fn func_new(
+        &mut self,
+        module: &str,
+        name: &str,
+        ty: FuncType,
+        func: impl Fn(Caller<'_, T>, &[Val], &mut [Val]) -> Result<(), Trap> + Send + Sync + 'static,
+    ) -> Result<&mut Self> {
+        let func = HostFunc::new(&self.engine, ty, func);
+        let key = self.import_key(module, Some(name));
+        self.insert(key, Definition::HostFunc(Arc::new(func)))?;
+        Ok(self)
+    }
+
+    /// Creates a [`Func::new_unchecked`]-style function named in this linker.
+    ///
+    /// For more information see [`Linker::func_wrap`].
+    #[cfg(compiler)]
+    #[cfg_attr(nightlydoc, doc(cfg(feature = "cranelift")))] // see build.rs
+    pub unsafe fn func_new_unchecked(
+        &mut self,
+        module: &str,
+        name: &str,
+        ty: FuncType,
+        func: impl Fn(Caller<'_, T>, *mut ValRaw) -> Result<(), Trap> + Send + Sync + 'static,
+    ) -> Result<&mut Self> {
+        let func = HostFunc::new_unchecked(&self.engine, ty, func);
+        let key = self.import_key(module, Some(name));
+        self.insert(key, Definition::HostFunc(Arc::new(func)))?;
+        Ok(self)
+    }
+
+    /// Creates a [`Func::new_async`]-style function named in this linker.
+    ///
+    /// For more information see [`Linker::func_wrap`].
+    #[cfg(all(feature = "async", feature = "cranelift"))]
+    #[cfg_attr(nightlydoc, doc(cfg(all(feature = "async", feature = "cranelift"))))]
+    pub fn func_new_async<F>(
+        &mut self,
+        module: &str,
+        name: &str,
+        ty: FuncType,
+        func: F,
+    ) -> Result<&mut Self>
+    where
+        F: for<'a> Fn(
+                Caller<'a, T>,
+                &'a [Val],
+                &'a mut [Val],
+            ) -> Box<dyn Future<Output = Result<(), Trap>> + Send + 'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        assert!(
+            self.engine.config().async_support,
+            "cannot use `func_new_async` without enabling async support in the config"
+        );
+        self.func_new(module, name, ty, move |mut caller, params, results| {
+            let async_cx = caller.store.as_context_mut().0.async_cx();
+            let mut future = Pin::from(func(caller, params, results));
+            match unsafe { async_cx.block_on(future.as_mut()) } {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(trap)) | Err(trap) => Err(trap),
+            }
+        })
+    }
+
+    /// Define a host function within this linker.
+    ///
+    /// For information about how the host function operates, see
+    /// [`Func::wrap`]. That includes information about translating Rust types
+    /// to WebAssembly native types.
+    ///
+    /// This method creates a host-provided function in this linker under the
+    /// provided name. This method is distinct in its capability to create a
+    /// [`Store`](crate::Store)-independent function. This means that the
+    /// function defined here can be used to instantiate instances in multiple
+    /// different stores, or in other words the function can be loaded into
+    /// different stores.
+    ///
+    /// Note that the capability mentioned here applies to all other
+    /// host-function-defining-methods on [`Linker`] as well. All of them can be
+    /// used to create instances of [`Func`] within multiple stores. In a
+    /// multithreaded program, for example, this means that the host functions
+    /// could be called concurrently if different stores are executing on
+    /// different threads.
     ///
     /// # Errors
     ///
@@ -188,11 +400,11 @@ impl Linker {
     /// ```
     /// # use wasmtime::*;
     /// # fn main() -> anyhow::Result<()> {
-    /// # let store = Store::default();
-    /// let mut linker = Linker::new(&store);
-    /// linker.func("host", "double", |x: i32| x * 2)?;
-    /// linker.func("host", "log_i32", |x: i32| println!("{}", x))?;
-    /// linker.func("host", "log_str", |caller: Caller, ptr: i32, len: i32| {
+    /// # let engine = Engine::default();
+    /// let mut linker = Linker::new(&engine);
+    /// linker.func_wrap("host", "double", |x: i32| x * 2)?;
+    /// linker.func_wrap("host", "log_i32", |x: i32| println!("{}", x))?;
+    /// linker.func_wrap("host", "log_str", |caller: Caller<'_, ()>, ptr: i32, len: i32| {
     ///     // ...
     /// })?;
     ///
@@ -203,19 +415,29 @@ impl Linker {
     ///         (import "host" "log_str" (func (param i32 i32)))
     ///     )
     /// "#;
-    /// let module = Module::new(store.engine(), wat)?;
-    /// linker.instantiate(&module)?;
+    /// let module = Module::new(&engine, wat)?;
+    ///
+    /// // instantiate in multiple different stores
+    /// for _ in 0..10 {
+    ///     let mut store = Store::new(&engine, ());
+    ///     linker.instantiate(&mut store, &module)?;
+    /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub fn func<Params, Args>(
+    pub fn func_wrap<Params, Args>(
         &mut self,
         module: &str,
         name: &str,
-        func: impl IntoFunc<Params, Args>,
+        func: impl IntoFunc<T, Params, Args>,
     ) -> Result<&mut Self> {
-        self._define(module, name, Func::wrap(&self.store, func).into())
+        let func = HostFunc::wrap(&self.engine, func);
+        let key = self.import_key(module, Some(name));
+        self.insert(key, Definition::HostFunc(Arc::new(func)))?;
+        Ok(self)
     }
+
+    for_each_function_signature!(generate_wrap_async_func);
 
     /// Convenience wrapper to define an entire [`Instance`] in this linker.
     ///
@@ -224,30 +446,41 @@ impl Linker {
     /// for each export is `module_name`, and the name for each export is the
     /// name in the instance itself.
     ///
+    /// Note that when this API is used the [`Linker`] is no longer compatible
+    /// with multi-[`Store`][crate::Store] instantiation because the items
+    /// defined within this store will belong to the `store` provided, and only
+    /// the `store` provided.
+    ///
     /// # Errors
     ///
     /// Returns an error if the any item is redefined twice in this linker (for
     /// example the same `module_name` was already defined) and shadowing is
-    /// disallowed, or if `instance` comes from a different [`Store`] than this
-    /// [`Linker`] originally was created with.
+    /// disallowed, or if `instance` comes from a different
+    /// [`Store`](crate::Store) than this [`Linker`] originally was created
+    /// with.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `instance` does not belong to `store`.
     ///
     /// # Examples
     ///
     /// ```
     /// # use wasmtime::*;
     /// # fn main() -> anyhow::Result<()> {
-    /// # let store = Store::default();
-    /// let mut linker = Linker::new(&store);
+    /// # let engine = Engine::default();
+    /// # let mut store = Store::new(&engine, ());
+    /// let mut linker = Linker::new(&engine);
     ///
     /// // Instantiate a small instance...
     /// let wat = r#"(module (func (export "run") ))"#;
-    /// let module = Module::new(store.engine(), wat)?;
-    /// let instance = linker.instantiate(&module)?;
+    /// let module = Module::new(&engine, wat)?;
+    /// let instance = linker.instantiate(&mut store, &module)?;
     ///
     /// // ... and inform the linker that the name of this instance is
     /// // `instance1`. This defines the `instance1::run` name for our next
     /// // module to use.
-    /// linker.instance("instance1", &instance)?;
+    /// linker.instance(&mut store, "instance1", instance)?;
     ///
     /// let wat = r#"
     ///     (module
@@ -257,17 +490,20 @@ impl Linker {
     ///         )
     ///     )
     /// "#;
-    /// let module = Module::new(store.engine(), wat)?;
-    /// let instance = linker.instantiate(&module)?;
+    /// let module = Module::new(&engine, wat)?;
+    /// let instance = linker.instantiate(&mut store, &module)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn instance(&mut self, module_name: &str, instance: &Instance) -> Result<&mut Self> {
-        if !Store::same(&self.store, instance.store()) {
-            bail!("all linker items must be from the same store");
-        }
-        for export in instance.exports() {
-            self.insert(module_name, export.name(), export.into_extern())?;
+    pub fn instance(
+        &mut self,
+        mut store: impl AsContextMut<Data = T>,
+        module_name: &str,
+        instance: Instance,
+    ) -> Result<&mut Self> {
+        for export in instance.exports(store.as_context_mut()) {
+            let key = self.import_key(module_name, Some(export.name()));
+            self.insert(key, Definition::Extern(export.into_extern()))?;
         }
         Ok(self)
     }
@@ -296,24 +532,31 @@ impl Linker {
     ///
     /// Returns an error if the any item is redefined twice in this linker (for
     /// example the same `module_name` was already defined) and shadowing is
-    /// disallowed, if `instance` comes from a different [`Store`] than this
-    /// [`Linker`] originally was created with, or if a Reactor initialization
-    /// function traps.
+    /// disallowed, if `instance` comes from a different
+    /// [`Store`](crate::Store) than this [`Linker`] originally was created
+    /// with, or if a Reactor initialization function traps.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any item used to instantiate the provided [`Module`] is not
+    /// owned by `store`, or if the `store` provided comes from a different
+    /// [`Engine`] than this [`Linker`].
     ///
     /// # Examples
     ///
     /// ```
     /// # use wasmtime::*;
     /// # fn main() -> anyhow::Result<()> {
-    /// # let store = Store::default();
-    /// let mut linker = Linker::new(&store);
+    /// # let engine = Engine::default();
+    /// # let mut store = Store::new(&engine, ());
+    /// let mut linker = Linker::new(&engine);
     ///
     /// // Instantiate a small instance and inform the linker that the name of
     /// // this instance is `instance1`. This defines the `instance1::run` name
     /// // for our next module to use.
     /// let wat = r#"(module (func (export "run") ))"#;
-    /// let module = Module::new(store.engine(), wat)?;
-    /// linker.module("instance1", &module)?;
+    /// let module = Module::new(&engine, wat)?;
+    /// linker.module(&mut store, "instance1", &module)?;
     ///
     /// let wat = r#"
     ///     (module
@@ -323,8 +566,8 @@ impl Linker {
     ///         )
     ///     )
     /// "#;
-    /// let module = Module::new(store.engine(), wat)?;
-    /// let instance = linker.instantiate(&module)?;
+    /// let module = Module::new(&engine, wat)?;
+    /// let instance = linker.instantiate(&mut store, &module)?;
     /// # Ok(())
     /// # }
     /// ```
@@ -334,8 +577,9 @@ impl Linker {
     /// ```
     /// # use wasmtime::*;
     /// # fn main() -> anyhow::Result<()> {
-    /// # let store = Store::default();
-    /// let mut linker = Linker::new(&store);
+    /// # let engine = Engine::default();
+    /// # let mut store = Store::new(&engine, ());
+    /// let mut linker = Linker::new(&engine);
     ///
     /// // Create a Command that attempts to count the number of times it is run, but is
     /// // foiled by each call getting a new instance.
@@ -350,12 +594,14 @@ impl Linker {
     ///         )
     ///     )
     /// "#;
-    /// let module = Module::new(store.engine(), wat)?;
-    /// linker.module("commander", &module)?;
-    /// let run = linker.get_default("")?.get0::<()>()?;
-    /// run()?;
-    /// run()?;
-    /// run()?;
+    /// let module = Module::new(&engine, wat)?;
+    /// linker.module(&mut store, "commander", &module)?;
+    /// let run = linker.get_default(&mut store, "")?
+    ///     .typed::<(), (), _>(&store)?
+    ///     .clone();
+    /// run.call(&mut store, ())?;
+    /// run.call(&mut store, ())?;
+    /// run.call(&mut store, ())?;
     ///
     /// let wat = r#"
     ///     (module
@@ -369,65 +615,171 @@ impl Linker {
     ///         )
     ///     )
     /// "#;
-    /// let module = Module::new(store.engine(), wat)?;
-    /// linker.module("", &module)?;
-    /// let count = linker.get_one_by_name("", "run")?.into_func().unwrap().get0::<i32>()?()?;
+    /// let module = Module::new(&engine, wat)?;
+    /// linker.module(&mut store, "", &module)?;
+    /// let run = linker.get(&mut store, "", Some("run")).unwrap().into_func().unwrap();
+    /// let count = run.typed::<(), i32, _>(&store)?.call(&mut store, ())?;
     /// assert_eq!(count, 0, "a Command should get a fresh instance on each invocation");
     ///
     /// # Ok(())
     /// # }
     /// ```
-    pub fn module(&mut self, module_name: &str, module: &Module) -> Result<&mut Self> {
-        match ModuleKind::categorize(module)? {
-            ModuleKind::Command => self.command(module_name, module),
-            ModuleKind::Reactor => {
-                let instance = self.instantiate(&module)?;
+    #[cfg(compiler)]
+    #[cfg_attr(nightlydoc, doc(cfg(feature = "cranelift")))] // see build.rs
+    pub fn module(
+        &mut self,
+        mut store: impl AsContextMut<Data = T>,
+        module_name: &str,
+        module: &Module,
+    ) -> Result<&mut Self>
+    where
+        T: 'static,
+    {
+        // NB: this is intended to function the same as `Linker::module_async`,
+        // they should be kept in sync.
 
-                if let Some(export) = instance.get_export("_initialize") {
+        // This assert isn't strictly necessary since it'll bottom out in the
+        // `HostFunc::to_func` method anyway. This is placed earlier for this
+        // function though to prevent the functions created here from delaying
+        // the panic until they're called.
+        assert!(
+            Engine::same(&self.engine, store.as_context().engine()),
+            "different engines for this linker and the store provided"
+        );
+        match ModuleKind::categorize(module)? {
+            ModuleKind::Command => {
+                self.command(
+                    store,
+                    module_name,
+                    module,
+                    |store, func_ty, export_name, instance_pre| {
+                        Func::new(
+                            store,
+                            func_ty.clone(),
+                            move |mut caller, params, results| {
+                                // Create a new instance for this command execution.
+                                let instance = instance_pre.instantiate(&mut caller)?;
+
+                                // `unwrap()` everything here because we know the instance contains a
+                                // function export with the given name and signature because we're
+                                // iterating over the module it was instantiated from.
+                                instance
+                                    .get_export(&mut caller, &export_name)
+                                    .unwrap()
+                                    .into_func()
+                                    .unwrap()
+                                    .call(&mut caller, params, results)
+                                    .map_err(|error| error.downcast::<Trap>().unwrap())?;
+
+                                Ok(())
+                            },
+                        )
+                    },
+                )
+            }
+            ModuleKind::Reactor => {
+                let instance = self.instantiate(&mut store, &module)?;
+
+                if let Some(export) = instance.get_export(&mut store, "_initialize") {
                     if let Extern::Func(func) = export {
-                        func.get0::<()>()
-                            .and_then(|f| f().map_err(Into::into))
+                        func.typed::<(), (), _>(&store)
+                            .and_then(|f| f.call(&mut store, ()).map_err(Into::into))
                             .context("calling the Reactor initialization function")?;
                     }
                 }
 
-                self.instance(module_name, &instance)
+                self.instance(store, module_name, instance)
             }
         }
     }
 
-    fn command(&mut self, module_name: &str, module: &Module) -> Result<&mut Self> {
+    /// Define automatic instantiations of a [`Module`] in this linker.
+    ///
+    /// This is the same as [`Linker::module`], except for async `Store`s.
+    #[cfg(all(feature = "async", feature = "cranelift"))]
+    #[cfg_attr(nightlydoc, doc(cfg(all(feature = "async", feature = "cranelift"))))]
+    pub async fn module_async(
+        &mut self,
+        mut store: impl AsContextMut<Data = T>,
+        module_name: &str,
+        module: &Module,
+    ) -> Result<&mut Self>
+    where
+        T: Send + 'static,
+    {
+        // NB: this is intended to function the same as `Linker::module`, they
+        // should be kept in sync.
+        assert!(
+            Engine::same(&self.engine, store.as_context().engine()),
+            "different engines for this linker and the store provided"
+        );
+        match ModuleKind::categorize(module)? {
+            ModuleKind::Command => self.command(
+                store,
+                module_name,
+                module,
+                |store, func_ty, export_name, instance_pre| {
+                    let upvars = Arc::new((instance_pre, export_name));
+                    Func::new_async(
+                        store,
+                        func_ty.clone(),
+                        move |mut caller, params, results| {
+                            let upvars = upvars.clone();
+                            Box::new(async move {
+                                let (instance_pre, export_name) = &*upvars;
+                                let instance = instance_pre.instantiate_async(&mut caller).await?;
+
+                                instance
+                                    .get_export(&mut caller, &export_name)
+                                    .unwrap()
+                                    .into_func()
+                                    .unwrap()
+                                    .call_async(&mut caller, params, results)
+                                    .await
+                                    .map_err(|error| error.downcast::<Trap>().unwrap())?;
+                                Ok(())
+                            })
+                        },
+                    )
+                },
+            ),
+            ModuleKind::Reactor => {
+                let instance = self.instantiate_async(&mut store, &module).await?;
+
+                if let Some(export) = instance.get_export(&mut store, "_initialize") {
+                    if let Extern::Func(func) = export {
+                        let func = func
+                            .typed::<(), (), _>(&store)
+                            .context("loading the Reactor initialization function")?;
+                        func.call_async(&mut store, ())
+                            .await
+                            .context("calling the Reactor initialization function")?;
+                    }
+                }
+
+                self.instance(store, module_name, instance)
+            }
+        }
+    }
+
+    fn command(
+        &mut self,
+        mut store: impl AsContextMut<Data = T>,
+        module_name: &str,
+        module: &Module,
+        mk_func: impl Fn(&mut StoreContextMut<T>, &FuncType, String, InstancePre<T>) -> Func,
+    ) -> Result<&mut Self>
+    where
+        T: 'static,
+    {
+        let mut store = store.as_context_mut();
         for export in module.exports() {
             if let Some(func_ty) = export.ty().func() {
-                let imports = self.compute_imports(module)?;
-                let store = self.store.clone();
-                let module = module.clone();
+                let instance_pre = self.instantiate_pre(&mut store, module)?;
                 let export_name = export.name().to_owned();
-                let func = Func::new(&self.store, func_ty.clone(), move |_, params, results| {
-                    // Create a new instance for this command execution.
-                    let instance = Instance::new(&store, &module, &imports)?;
-
-                    // `unwrap()` everything here because we know the instance contains a
-                    // function export with the given name and signature because we're
-                    // iterating over the module it was instantiated from.
-                    let command_results = instance
-                        .get_export(&export_name)
-                        .unwrap()
-                        .into_func()
-                        .unwrap()
-                        .call(params)
-                        .map_err(|error| error.downcast::<Trap>().unwrap())?;
-
-                    // Copy the return values into the output slice.
-                    for (result, command_result) in
-                        results.iter_mut().zip(command_results.into_vec())
-                    {
-                        *result = command_result;
-                    }
-
-                    Ok(())
-                });
-                self.insert(module_name, export.name(), func.into())?;
+                let func = mk_func(&mut store, func_ty, export_name, instance_pre);
+                let key = self.import_key(module_name, Some(export.name()));
+                self.insert(key, Definition::Extern(func.into()))?;
             } else if export.name() == "memory" && export.ty().memory().is_some() {
                 // Allow an exported "memory" memory for now.
             } else if export.name() == "__indirect_function_table" && export.ty().table().is_some()
@@ -445,15 +797,45 @@ impl Linker {
                 // which use --export-dynamic, which unfortunately doesn't work the way
                 // we want it to.
                 warn!("command module exporting '__heap_base' is deprecated");
+            } else if export.name() == "__dso_handle" && export.ty().global().is_some() {
+                // Allow an exported "__dso_handle" memory for compatibility with toolchains
+                // which use --export-dynamic, which unfortunately doesn't work the way
+                // we want it to.
+                warn!("command module exporting '__dso_handle' is deprecated")
             } else if export.name() == "__rtti_base" && export.ty().global().is_some() {
                 // Allow an exported "__rtti_base" memory for compatibility with
                 // AssemblyScript.
                 warn!("command module exporting '__rtti_base' is deprecated; pass `--runtime half` to the AssemblyScript compiler");
-            } else {
+            } else if !self.allow_unknown_exports {
                 bail!("command export '{}' is not a function", export.name());
             }
         }
 
+        Ok(self)
+    }
+
+    /// Aliases one item's name as another.
+    ///
+    /// This method will alias an item with the specified `module` and `name`
+    /// under a new name of `as_module` and `as_name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any shadowing violations happen while defining new
+    /// items, or if the original item wasn't defined.
+    pub fn alias(
+        &mut self,
+        module: &str,
+        name: &str,
+        as_module: &str,
+        as_name: &str,
+    ) -> Result<&mut Self> {
+        let src = self.import_key(module, Some(name));
+        let dst = self.import_key(as_module, Some(as_name));
+        match self.map.get(&src).cloned() {
+            Some(item) => self.insert(dst, item)?,
+            None => bail!("no item named `{}::{}` defined", module, name),
+        }
         Ok(self)
     }
 
@@ -466,27 +848,37 @@ impl Linker {
     ///
     /// Returns an error if any shadowing violations happen while defining new
     /// items.
-    pub fn alias(&mut self, module: &str, as_module: &str) -> Result<()> {
+    pub fn alias_module(&mut self, module: &str, as_module: &str) -> Result<()> {
+        let module = self.intern_str(module);
+        let as_module = self.intern_str(as_module);
         let items = self
+            .map
             .iter()
-            .filter(|(m, _, _)| *m == module)
-            .map(|(_, name, item)| (name.to_string(), item))
+            .filter(|(key, _def)| key.module == module)
+            .map(|(key, def)| (key.name, def.clone()))
             .collect::<Vec<_>>();
         for (name, item) in items {
-            self.define(as_module, &name, item)?;
+            self.insert(
+                ImportKey {
+                    module: as_module,
+                    name,
+                },
+                item,
+            )?;
         }
         Ok(())
     }
 
-    fn insert(&mut self, module: &str, name: &str, item: Extern) -> Result<()> {
-        let key = self.import_key(module, name, item.ty());
+    fn insert(&mut self, key: ImportKey, item: Definition) -> Result<()> {
         match self.map.entry(key) {
-            Entry::Occupied(o) if !self.allow_shadowing => bail!(
-                "import of `{}::{}` with kind {:?} defined twice",
-                module,
-                name,
-                o.key().kind,
-            ),
+            Entry::Occupied(_) if !self.allow_shadowing => {
+                let module = &self.strings[key.module];
+                let desc = match self.strings.get(key.name) {
+                    Some(name) => format!("{}::{}", module, name),
+                    None => module.to_string(),
+                };
+                bail!("import of `{}` defined twice", desc)
+            }
             Entry::Occupied(mut o) => {
                 o.insert(item);
             }
@@ -497,20 +889,12 @@ impl Linker {
         Ok(())
     }
 
-    fn import_key(&mut self, module: &str, name: &str, ty: ExternType) -> ImportKey {
+    fn import_key(&mut self, module: &str, name: Option<&str>) -> ImportKey {
         ImportKey {
             module: self.intern_str(module),
-            name: self.intern_str(name),
-            kind: self.import_kind(ty),
-        }
-    }
-
-    fn import_kind(&self, ty: ExternType) -> ImportKind {
-        match ty {
-            ExternType::Func(f) => ImportKind::Func(f),
-            ExternType::Global(f) => ImportKind::Global(f),
-            ExternType::Memory(_) => ImportKind::Memory,
-            ExternType::Table(_) => ImportKind::Table,
+            name: name
+                .map(|name| self.intern_str(name))
+                .unwrap_or(usize::max_value()),
         }
     }
 
@@ -518,7 +902,7 @@ impl Linker {
         if let Some(idx) = self.string2idx.get(string) {
             return *idx;
         }
-        let string: Rc<str> = string.into();
+        let string: Arc<str> = string.into();
         let idx = self.strings.len();
         self.strings.push(string.clone());
         self.string2idx.insert(string, idx);
@@ -547,75 +931,122 @@ impl Linker {
     /// instantiation itself may fail. For information on instantiation
     /// failures see [`Instance::new`].
     ///
+    /// # Panics
+    ///
+    /// Panics if any item used to instantiate `module` is not owned by
+    /// `store`. Additionally this will panic if the [`Engine`] that the `store`
+    /// belongs to is different than this [`Linker`].
+    ///
     /// # Examples
     ///
     /// ```
     /// # use wasmtime::*;
     /// # fn main() -> anyhow::Result<()> {
-    /// # let store = Store::default();
-    /// let mut linker = Linker::new(&store);
-    /// linker.func("host", "double", |x: i32| x * 2)?;
+    /// # let engine = Engine::default();
+    /// # let mut store = Store::new(&engine, ());
+    /// let mut linker = Linker::new(&engine);
+    /// linker.func_wrap("host", "double", |x: i32| x * 2)?;
     ///
     /// let wat = r#"
     ///     (module
     ///         (import "host" "double" (func (param i32) (result i32)))
     ///     )
     /// "#;
-    /// let module = Module::new(store.engine(), wat)?;
-    /// linker.instantiate(&module)?;
+    /// let module = Module::new(&engine, wat)?;
+    /// linker.instantiate(&mut store, &module)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn instantiate(&self, module: &Module) -> Result<Instance> {
-        let imports = self.compute_imports(module)?;
-
-        Instance::new(&self.store, module, &imports)
+    pub fn instantiate(
+        &self,
+        mut store: impl AsContextMut<Data = T>,
+        module: &Module,
+    ) -> Result<Instance> {
+        self.instantiate_pre(&mut store, module)?.instantiate(store)
     }
 
-    fn compute_imports(&self, module: &Module) -> Result<Vec<Extern>> {
-        module
+    /// Attempts to instantiate the `module` provided. This is the same as
+    /// [`Linker::instantiate`], except for async `Store`s.
+    #[cfg(feature = "async")]
+    #[cfg_attr(nightlydoc, doc(cfg(feature = "async")))]
+    pub async fn instantiate_async(
+        &self,
+        mut store: impl AsContextMut<Data = T>,
+        module: &Module,
+    ) -> Result<Instance>
+    where
+        T: Send,
+    {
+        self.instantiate_pre(&mut store, module)?
+            .instantiate_async(store)
+            .await
+    }
+
+    /// Performs all checks necessary for instantiating `module` with this
+    /// linker within `store`, except that instantiation doesn't actually
+    /// finish.
+    ///
+    /// This method is used for front-loading type-checking information as well
+    /// as collecting the imports to use to instantiate a module with. The
+    /// returned [`InstancePre`] represents a ready-to-be-instantiated module,
+    /// which can also be instantiated multiple times if desired.
+    ///
+    /// # Panics
+    ///
+    /// This method will panic if any item defined in this linker used by
+    /// `module` is not owned by `store`. Additionally this will panic if the
+    /// [`Engine`] that the `store` belongs to is different than this
+    /// [`Linker`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use wasmtime::*;
+    /// # fn main() -> anyhow::Result<()> {
+    /// # let engine = Engine::default();
+    /// # let mut store = Store::new(&engine, ());
+    /// let mut linker = Linker::new(&engine);
+    /// linker.func_wrap("host", "double", |x: i32| x * 2)?;
+    ///
+    /// let wat = r#"
+    ///     (module
+    ///         (import "host" "double" (func (param i32) (result i32)))
+    ///     )
+    /// "#;
+    /// let module = Module::new(&engine, wat)?;
+    /// let instance_pre = linker.instantiate_pre(&mut store, &module)?;
+    ///
+    /// // Finish instantiation after the type-checking has all completed...
+    /// let instance = instance_pre.instantiate(&mut store)?;
+    ///
+    /// // ... and we can even continue to keep instantiating if desired!
+    /// instance_pre.instantiate(&mut store)?;
+    /// instance_pre.instantiate(&mut store)?;
+    ///
+    /// // Note that functions defined in a linker with `func_wrap` and similar
+    /// // constructors are not owned by any particular `Store`, so we can also
+    /// // instantiate our `instance_pre` in other stores because no imports
+    /// // belong to the original store.
+    /// let mut new_store = Store::new(&engine, ());
+    /// instance_pre.instantiate(&mut new_store)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn instantiate_pre(
+        &self,
+        mut store: impl AsContextMut<Data = T>,
+        module: &Module,
+    ) -> Result<InstancePre<T>> {
+        let store = store.as_context_mut().0;
+        let imports = module
             .imports()
-            .map(|import| self.get(&import).ok_or_else(|| self.link_error(&import)))
-            .collect()
+            .map(|import| self._get_by_import(&import))
+            .collect::<Result<_>>()?;
+        unsafe { InstancePre::new(store, module, imports) }
     }
 
-    fn link_error(&self, import: &ImportType) -> Error {
-        let mut options = Vec::new();
-        for i in self.map.keys() {
-            if &*self.strings[i.module] != import.module()
-                || &*self.strings[i.name] != import.name()
-            {
-                continue;
-            }
-            options.push(format!("  * {:?}\n", i.kind));
-        }
-        if options.is_empty() {
-            return anyhow!(
-                "unknown import: `{}::{}` has not been defined",
-                import.module(),
-                import.name()
-            );
-        }
-
-        options.sort();
-
-        anyhow!(
-            "incompatible import type for `{}::{}` specified\n\
-                 desired signature was: {:?}\n\
-                 signatures available:\n\n{}",
-            import.module(),
-            import.name(),
-            import.ty(),
-            options.concat(),
-        )
-    }
-
-    /// Returns the [`Store`] that this linker is connected to.
-    pub fn store(&self) -> &Store {
-        &self.store
-    }
-
-    /// Returns an iterator over all items defined in this `Linker`, in arbitrary order.
+    /// Returns an iterator over all items defined in this `Linker`, in
+    /// arbitrary order.
     ///
     /// The iterator returned will yield 3-tuples where the first two elements
     /// are the module name and item name for the external item, and the third
@@ -623,73 +1054,135 @@ impl Linker {
     ///
     /// Note that multiple `Extern` items may be defined for the same
     /// module/name pair.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &str, Extern)> {
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the `store` provided does not come from the
+    /// same [`Engine`] that this linker was created with.
+    pub fn iter<'a: 'p, 'p>(
+        &'a self,
+        mut store: impl AsContextMut<Data = T> + 'p,
+    ) -> impl Iterator<Item = (&str, &str, Extern)> + 'p {
         self.map.iter().map(move |(key, item)| {
+            let store = store.as_context_mut();
             (
                 &*self.strings[key.module],
                 &*self.strings[key.name],
-                item.clone(),
+                // Should be safe since `T` is connecting the linker and store
+                unsafe { item.to_extern(store.0) },
             )
         })
+    }
+
+    /// Looks up a previously defined value in this [`Linker`], identified by
+    /// the names provided.
+    ///
+    /// Returns `None` if this name was not previously defined in this
+    /// [`Linker`].
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the `store` provided does not come from the
+    /// same [`Engine`] that this linker was created with.
+    pub fn get(
+        &self,
+        mut store: impl AsContextMut<Data = T>,
+        module: &str,
+        name: Option<&str>,
+    ) -> Option<Extern> {
+        let store = store.as_context_mut().0;
+        // Should be safe since `T` is connecting the linker and store
+        Some(unsafe { self._get(module, name)?.to_extern(store) })
+    }
+
+    fn _get(&self, module: &str, name: Option<&str>) -> Option<&Definition> {
+        let key = ImportKey {
+            module: *self.string2idx.get(module)?,
+            name: match name {
+                Some(name) => *self.string2idx.get(name)?,
+                None => usize::max_value(),
+            },
+        };
+        self.map.get(&key)
     }
 
     /// Looks up a value in this `Linker` which matches the `import` type
     /// provided.
     ///
     /// Returns `None` if no match was found.
-    pub fn get(&self, import: &ImportType) -> Option<Extern> {
-        let key = ImportKey {
-            module: *self.string2idx.get(import.module())?,
-            name: *self.string2idx.get(import.name())?,
-            kind: self.import_kind(import.ty()),
-        };
-        self.map.get(&key).cloned()
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the `store` provided does not come from the
+    /// same [`Engine`] that this linker was created with.
+    pub fn get_by_import(
+        &self,
+        mut store: impl AsContextMut<Data = T>,
+        import: &ImportType,
+    ) -> Option<Extern> {
+        let store = store.as_context_mut().0;
+        // Should be safe since `T` is connecting the linker and store
+        Some(unsafe { self._get_by_import(import).ok()?.to_extern(store) })
     }
 
-    /// Returns all items defined for the `module` and `name` pair.
-    ///
-    /// This may return an empty iterator, but it may also return multiple items
-    /// if the module/name have been defined twice.
-    pub fn get_by_name<'a: 'p, 'p>(
-        &'a self,
-        module: &'p str,
-        name: &'p str,
-    ) -> impl Iterator<Item = &'a Extern> + 'p {
-        self.map
-            .iter()
-            .filter(move |(key, _item)| {
-                &*self.strings[key.module] == module && &*self.strings[key.name] == name
-            })
-            .map(|(_, item)| item)
-    }
-
-    /// Returns the single item defined for the `module` and `name` pair.
-    ///
-    /// Unlike the similar [`Linker::get_by_name`] method this function returns
-    /// a single `Extern` item. If the `module` and `name` pair isn't defined
-    /// in this linker then an error is returned. If more than one value exists
-    /// for the `module` and `name` pairs, then an error is returned as well.
-    pub fn get_one_by_name(&self, module: &str, name: &str) -> Result<Extern> {
-        let mut items = self.get_by_name(module, name);
-        let ret = items
-            .next()
-            .ok_or_else(|| anyhow!("no item named `{}` in `{}`", name, module))?;
-        if items.next().is_some() {
-            bail!("too many items named `{}` in `{}`", name, module);
+    fn _get_by_import(&self, import: &ImportType) -> anyhow::Result<Definition> {
+        fn undef_err(missing_import: &str) -> anyhow::Error {
+            anyhow!("unknown import: `{}` has not been defined", missing_import)
         }
-        Ok(ret.clone())
+
+        if let Some(item) = self._get(import.module(), import.name()) {
+            return Ok(item.clone());
+        }
+
+        if let Some(name) = import.name() {
+            return Err(undef_err(&format!("{}::{}", import.module(), name)));
+        }
+
+        if let ExternType::Instance(t) = import.ty() {
+            // This is a key location where the module linking proposal is
+            // implemented. This logic allows single-level imports of an instance to
+            // get satisfied by multiple definitions of items within this `Linker`.
+            //
+            // The instance being import is iterated over to load the names from
+            // this `Linker` (recursively calling `get`). If anything isn't defined
+            // we return `None` since the entire value isn't defined. Otherwise when
+            // all values are loaded it's assembled into an `Instance` and
+            // returned`.
+            //
+            // Note that this isn't exactly the speediest implementation in the
+            // world. Ideally we would pre-create the `Instance` instead of creating
+            // it each time a module is instantiated. For now though while the
+            // module linking proposal is under development this should hopefully
+            // suffice.
+            let mut map = indexmap::IndexMap::new();
+            for export in t.exports() {
+                let item = self
+                    ._get(import.module(), Some(export.name()))
+                    .ok_or_else(|| undef_err(&format!("{}::{}", import.module(), export.name())))?;
+                map.insert(export.name().to_string(), item.clone());
+            }
+            return Ok(Definition::Instance(Arc::new(map)));
+        }
+
+        Err(undef_err(&import.module()))
     }
 
     /// Returns the "default export" of a module.
     ///
     /// An export with an empty string is considered to be a "default export".
     /// "_start" is also recognized for compatibility.
-    pub fn get_default(&self, module: &str) -> Result<Func> {
-        let mut items = self.get_by_name(module, "");
-        if let Some(external) = items.next() {
-            if items.next().is_some() {
-                bail!("too many items named `` in `{}`", module);
-            }
+    ///
+    /// # Panics
+    ///
+    /// Panics if the default function found is not owned by `store`. This
+    /// function will also panic if the `store` provided does not come from the
+    /// same [`Engine`] that this linker was created with.
+    pub fn get_default(
+        &self,
+        mut store: impl AsContextMut<Data = T>,
+        module: &str,
+    ) -> Result<Func> {
+        if let Some(external) = self.get(&mut store, module, Some("")) {
             if let Extern::Func(func) = external {
                 return Ok(func.clone());
             }
@@ -697,11 +1190,7 @@ impl Linker {
         }
 
         // For compatibility, also recognize "_start".
-        let mut items = self.get_by_name(module, "_start");
-        if let Some(external) = items.next() {
-            if items.next().is_some() {
-                bail!("too many items named `_start` in `{}`", module);
-            }
+        if let Some(external) = self.get(&mut store, module, Some("_start")) {
             if let Extern::Func(func) = external {
                 return Ok(func.clone());
             }
@@ -709,11 +1198,41 @@ impl Linker {
         }
 
         // Otherwise return a no-op function.
-        Ok(Func::new(
-            &self.store,
-            FuncType::new(Vec::new().into_boxed_slice(), Vec::new().into_boxed_slice()),
-            move |_, _, _| Ok(()),
-        ))
+        Ok(Func::wrap(store, || {}))
+    }
+}
+
+impl<T> Default for Linker<T> {
+    fn default() -> Linker<T> {
+        Linker::new(&Engine::default())
+    }
+}
+
+impl Definition {
+    /// Note the unsafety here is due to calling `HostFunc::to_func`. The
+    /// requirement here is that the `T` that was originally used to create the
+    /// `HostFunc` matches the `T` on the store.
+    pub(crate) unsafe fn to_extern(&self, store: &mut StoreOpaque) -> Extern {
+        match self {
+            Definition::Extern(e) => e.clone(),
+            Definition::HostFunc(func) => func.to_func(store).into(),
+            Definition::Instance(i) => {
+                let items = Arc::new(
+                    i.iter()
+                        .map(|(name, item)| (name.clone(), item.to_extern(store)))
+                        .collect(),
+                );
+                Instance::from_wasmtime(InstanceData::Synthetic(items), store).into()
+            }
+        }
+    }
+
+    pub(crate) fn comes_from_same_store(&self, store: &StoreOpaque) -> bool {
+        match self {
+            Definition::Extern(e) => e.comes_from_same_store(store),
+            Definition::HostFunc(_func) => true,
+            Definition::Instance(i) => i.values().all(|e| e.comes_from_same_store(store)),
+        }
     }
 }
 

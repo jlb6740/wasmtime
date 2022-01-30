@@ -1,5 +1,4 @@
-use crate::environ::{WasmError, WasmResult};
-use crate::translation_utils::SignatureIndex;
+use crate::{SignatureIndex, WasmError, WasmResult};
 use cranelift_codegen::ir::{types, Type};
 use cranelift_entity::PrimaryMap;
 use std::boxed::Box;
@@ -30,6 +29,7 @@ fn cranelift_to_wasmparser_type(ty: Type) -> WasmResult<wasmparser::Type> {
         types::I64 => wasmparser::Type::I64,
         types::F32 => wasmparser::Type::F32,
         types::F64 => wasmparser::Type::F64,
+        types::R32 | types::R64 => wasmparser::Type::ExternRef,
         _ => {
             return Err(WasmError::Unsupported(format!(
                 "Cannot convert Cranelift type to Wasm signature: {:?}",

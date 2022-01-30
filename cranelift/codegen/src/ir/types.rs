@@ -3,6 +3,8 @@
 use core::default::Default;
 use core::fmt::{self, Debug, Display, Formatter};
 use cranelift_codegen_shared::constants;
+#[cfg(feature = "enable-serde")]
+use serde::{Deserialize, Serialize};
 use target_lexicon::{PointerWidth, Triple};
 
 /// The type of an SSA value.
@@ -21,6 +23,7 @@ use target_lexicon::{PointerWidth, Triple};
 /// SIMD vector types have power-of-two lanes, up to 256. Lanes can be any int/float/bool type.
 ///
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct Type(u8);
 
 /// Not a valid type. Can't be loaded or stored. Can't be part of a SIMD vector.
@@ -76,7 +79,33 @@ impl Type {
         }
     }
 
+    /// Get the (minimum, maximum) values represented by each lane in the type.
+    /// Note that these are returned as unsigned 'bit patterns'.
+    pub fn bounds(self, signed: bool) -> (u128, u128) {
+        if signed {
+            match self.lane_type() {
+                I8 => (i8::MIN as u128, i8::MAX as u128),
+                I16 => (i16::MIN as u128, i16::MAX as u128),
+                I32 => (i32::MIN as u128, i32::MAX as u128),
+                I64 => (i64::MIN as u128, i64::MAX as u128),
+                I128 => (i128::MIN as u128, i128::MAX as u128),
+                _ => unimplemented!(),
+            }
+        } else {
+            match self.lane_type() {
+                I8 => (u8::MIN as u128, u8::MAX as u128),
+                I16 => (u16::MIN as u128, u16::MAX as u128),
+                I32 => (u32::MIN as u128, u32::MAX as u128),
+                I64 => (u64::MIN as u128, u64::MAX as u128),
+                I128 => (u128::MIN, u128::MAX),
+                _ => unimplemented!(),
+            }
+        }
+    }
+
     /// Get an integer type with the requested number of bits.
+    ///
+    /// For the same thing but in *bytes*, use [`Self::int_with_byte_size`].
     pub fn int(bits: u16) -> Option<Self> {
         match bits {
             8 => Some(I8),
@@ -86,6 +115,13 @@ impl Type {
             128 => Some(I128),
             _ => None,
         }
+    }
+
+    /// Get an integer type with the requested number of bytes.
+    ///
+    /// For the same thing but in *bits*, use [`Self::int`].
+    pub fn int_with_byte_size(bytes: u16) -> Option<Self> {
+        Self::int(bytes.checked_mul(8)?)
     }
 
     /// Get a type with the same number of lanes as `self`, but using `lane` as the lane type.
@@ -122,6 +158,21 @@ impl Type {
         } else {
             self.as_bool_pedantic()
         }
+    }
+
+    /// Get a type with the same number of lanes as this type, but with the lanes replaced by
+    /// integers of the same size.
+    ///
+    /// Scalar types follow this same rule, but `b1` is converted into `i8`
+    pub fn as_int(self) -> Self {
+        self.replace_lanes(match self.lane_type() {
+            I8 | B1 | B8 => I8,
+            I16 | B16 => I16,
+            I32 | B32 => I32,
+            I64 | B64 => I64,
+            I128 | B128 => I128,
+            _ => unimplemented!(),
+        })
     }
 
     /// Get a type with the same number of lanes as this type, but with lanes that are half the
@@ -188,6 +239,11 @@ impl Type {
             B1 | B8 | B16 | B32 | B64 | B128 => true,
             _ => false,
         }
+    }
+
+    /// Is this a vector boolean type?
+    pub fn is_bool_vector(self) -> bool {
+        self.is_vector() && self.lane_type().is_bool()
     }
 
     /// Is this a scalar integer type?
@@ -281,10 +337,21 @@ impl Type {
 
     /// Split the lane width in half and double the number of lanes to maintain the same bit-width.
     ///
-    /// If this is a scalar type of n bits, it produces a SIMD vector type of (n/2)x2.
+    /// If this is a scalar type of `n` bits, it produces a SIMD vector type of `(n/2)x2`.
     pub fn split_lanes(self) -> Option<Self> {
         match self.half_width() {
             Some(half_width) => half_width.by(2),
+            None => None,
+        }
+    }
+
+    /// Merge lanes to half the number of lanes and double the lane width to maintain the same
+    /// bit-width.
+    ///
+    /// If this is a scalar type, it will return `None`.
+    pub fn merge_lanes(self) -> Option<Self> {
+        match self.double_width() {
+            Some(double_width) => double_width.half_vector(),
             None => None,
         }
     }
@@ -309,6 +376,19 @@ impl Type {
             Ok(PointerWidth::U32) => I32,
             Ok(PointerWidth::U64) => I64,
             Err(()) => panic!("unable to determine architecture pointer width"),
+        }
+    }
+
+    /// Coerces boolean types (scalar and vectors) into their integer counterparts.
+    /// B1 is converted into I8.
+    pub fn coerce_bools_to_ints(self) -> Self {
+        let is_scalar_bool = self.is_bool();
+        let is_vector_bool = self.is_vector() && self.lane_type().is_bool();
+
+        if is_scalar_bool || is_vector_bool {
+            self.as_int()
+        } else {
+            self
         }
     }
 }
@@ -514,5 +594,32 @@ mod tests {
         assert_eq!(I32.as_bool(), B1);
         assert_eq!(I32X4.as_bool_pedantic(), B32X4);
         assert_eq!(I32.as_bool_pedantic(), B32);
+    }
+
+    #[test]
+    fn as_int() {
+        assert_eq!(B32X4.as_int(), I32X4);
+        assert_eq!(B8X8.as_int(), I8X8);
+        assert_eq!(B1.as_int(), I8);
+        assert_eq!(B8.as_int(), I8);
+        assert_eq!(B128.as_int(), I128);
+    }
+
+    #[test]
+    fn int_from_size() {
+        assert_eq!(Type::int(0), None);
+        assert_eq!(Type::int(8), Some(I8));
+        assert_eq!(Type::int(33), None);
+        assert_eq!(Type::int(64), Some(I64));
+
+        assert_eq!(Type::int_with_byte_size(0), None);
+        assert_eq!(Type::int_with_byte_size(2), Some(I16));
+        assert_eq!(Type::int_with_byte_size(6), None);
+        assert_eq!(Type::int_with_byte_size(16), Some(I128));
+
+        // Ensure `int_with_byte_size` handles overflow properly
+        let evil = 0xE001_u16;
+        assert_eq!(evil.wrapping_mul(8), 8, "check the constant is correct");
+        assert_eq!(Type::int_with_byte_size(evil), None);
     }
 }

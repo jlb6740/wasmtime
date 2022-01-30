@@ -1,144 +1,89 @@
 //! Linking for JIT-compiled code.
 
-use crate::CodeMemory;
-use cranelift_codegen::binemit::Reloc;
-use cranelift_codegen::ir::JumpTableOffsets;
-use std::ptr::{read_unaligned, write_unaligned};
-use wasmtime_environ::entity::PrimaryMap;
-use wasmtime_environ::wasm::DefinedFuncIndex;
-use wasmtime_environ::{Module, Relocation, RelocationTarget};
+use object::read::{Object, Relocation, RelocationTarget};
+use object::{File, NativeEndian as NE, ObjectSymbol, RelocationEncoding, RelocationKind};
+use std::convert::TryFrom;
 use wasmtime_runtime::libcalls;
-use wasmtime_runtime::VMFunctionBody;
 
-/// Links a module that has been compiled with `compiled_module` in `wasmtime-environ`.
+type I32 = object::I32Bytes<NE>;
+type U64 = object::U64Bytes<NE>;
+
+/// Applies the relocation `r` at `offset` within `code`, according to the
+/// symbols found in `obj`.
 ///
-/// Performs all required relocations inside the function code, provided the necessary metadata.
-pub fn link_module(
-    code_memory: &mut CodeMemory,
-    module: &Module,
-    finished_functions: &PrimaryMap<DefinedFuncIndex, *mut [VMFunctionBody]>,
-    jt_offsets: &PrimaryMap<DefinedFuncIndex, JumpTableOffsets>,
-) {
-    for (fatptr, r) in code_memory.unpublished_relocations() {
-        let body = fatptr as *const VMFunctionBody;
-        apply_reloc(module, finished_functions, jt_offsets, body, r);
+/// This method is used at runtime to resolve relocations in ELF images,
+/// typically with respect to where the memory was placed in the final address
+/// in memory.
+pub fn apply_reloc(obj: &File, code: &mut [u8], offset: u64, r: Relocation) {
+    let target_func_address: usize = match r.target() {
+        RelocationTarget::Symbol(i) => {
+            // Processing relocation target is a named symbols that is compiled
+            // wasm function or runtime libcall.
+            let sym = obj.symbol_by_index(i).unwrap();
+            if sym.is_local() {
+                &code[sym.address() as usize] as *const u8 as usize
+            } else {
+                match sym.name() {
+                    Ok(name) => {
+                        if let Some(addr) = to_libcall_address(name) {
+                            addr
+                        } else {
+                            panic!("unknown function to link: {}", name);
+                        }
+                    }
+                    Err(_) => panic!("unexpected relocation target: not a symbol"),
+                }
+            }
+        }
+        _ => panic!("unexpected relocation target: not a symbol"),
+    };
+
+    match (r.kind(), r.encoding(), r.size()) {
+        (RelocationKind::Absolute, RelocationEncoding::Generic, 64) => {
+            let reloc_address = reloc_address::<U64>(code, offset);
+            let reloc_abs = (target_func_address as u64)
+                .checked_add(r.addend() as u64)
+                .unwrap();
+            reloc_address.set(NE, reloc_abs);
+        }
+
+        // FIXME(#3009) after the old backend is removed this won't ever show up
+        // again so it can be removed.
+        (RelocationKind::Relative, RelocationEncoding::Generic, 32) => {
+            let reloc_address = reloc_address::<I32>(code, offset);
+            let val = (target_func_address as i64)
+                .wrapping_add(r.addend())
+                .wrapping_sub(reloc_address as *const _ as i64);
+            reloc_address.set(NE, i32::try_from(val).expect("relocation out-of-bounds"));
+        }
+
+        other => panic!("unsupported reloc kind: {:?}", other),
     }
 }
 
-fn apply_reloc(
-    module: &Module,
-    finished_functions: &PrimaryMap<DefinedFuncIndex, *mut [VMFunctionBody]>,
-    jt_offsets: &PrimaryMap<DefinedFuncIndex, JumpTableOffsets>,
-    body: *const VMFunctionBody,
-    r: &Relocation,
-) {
-    use self::libcalls::*;
-    let target_func_address: usize = match r.reloc_target {
-        RelocationTarget::UserFunc(index) => match module.local.defined_func_index(index) {
-            Some(f) => {
-                let fatptr: *const [VMFunctionBody] = finished_functions[f];
-                fatptr as *const VMFunctionBody as usize
-            }
-            None => panic!("direct call to import"),
-        },
-        RelocationTarget::LibCall(libcall) => {
-            use cranelift_codegen::ir::LibCall::*;
-            match libcall {
-                UdivI64 => wasmtime_i64_udiv as usize,
-                SdivI64 => wasmtime_i64_sdiv as usize,
-                UremI64 => wasmtime_i64_urem as usize,
-                SremI64 => wasmtime_i64_srem as usize,
-                IshlI64 => wasmtime_i64_ishl as usize,
-                UshrI64 => wasmtime_i64_ushr as usize,
-                SshrI64 => wasmtime_i64_sshr as usize,
-                CeilF32 => wasmtime_f32_ceil as usize,
-                FloorF32 => wasmtime_f32_floor as usize,
-                TruncF32 => wasmtime_f32_trunc as usize,
-                NearestF32 => wasmtime_f32_nearest as usize,
-                CeilF64 => wasmtime_f64_ceil as usize,
-                FloorF64 => wasmtime_f64_floor as usize,
-                TruncF64 => wasmtime_f64_trunc as usize,
-                NearestF64 => wasmtime_f64_nearest as usize,
-                other => panic!("unexpected libcall: {}", other),
-            }
-        }
-        RelocationTarget::JumpTable(func_index, jt) => {
-            match module.local.defined_func_index(func_index) {
-                Some(f) => {
-                    let offset = *jt_offsets
-                        .get(f)
-                        .and_then(|ofs| ofs.get(jt))
-                        .expect("func jump table");
-                    let fatptr: *const [VMFunctionBody] = finished_functions[f];
-                    fatptr as *const VMFunctionBody as usize + offset as usize
-                }
-                None => panic!("func index of jump table"),
-            }
-        }
-    };
+fn reloc_address<T: object::Pod>(code: &mut [u8], offset: u64) -> &mut T {
+    let (reloc, _rest) = usize::try_from(offset)
+        .ok()
+        .and_then(move |offset| code.get_mut(offset..))
+        .and_then(|range| object::from_bytes_mut(range).ok())
+        .expect("invalid reloc offset");
+    reloc
+}
 
-    match r.reloc {
-        #[cfg(target_pointer_width = "64")]
-        Reloc::Abs8 => unsafe {
-            let reloc_address = body.add(r.offset as usize) as usize;
-            let reloc_addend = r.addend as isize;
-            let reloc_abs = (target_func_address as u64)
-                .checked_add(reloc_addend as u64)
-                .unwrap();
-            write_unaligned(reloc_address as *mut u64, reloc_abs);
-        },
-        #[cfg(target_pointer_width = "32")]
-        Reloc::X86PCRel4 => unsafe {
-            let reloc_address = body.add(r.offset as usize) as usize;
-            let reloc_addend = r.addend as isize;
-            let reloc_delta_u32 = (target_func_address as u32)
-                .wrapping_sub(reloc_address as u32)
-                .checked_add(reloc_addend as u32)
-                .unwrap();
-            write_unaligned(reloc_address as *mut u32, reloc_delta_u32);
-        },
-        #[cfg(target_pointer_width = "32")]
-        Reloc::X86CallPCRel4 => unsafe {
-            let reloc_address = body.add(r.offset as usize) as usize;
-            let reloc_addend = r.addend as isize;
-            let reloc_delta_u32 = (target_func_address as u32)
-                .wrapping_sub(reloc_address as u32)
-                .wrapping_add(reloc_addend as u32);
-            write_unaligned(reloc_address as *mut u32, reloc_delta_u32);
-        },
-        #[cfg(target_pointer_width = "64")]
-        Reloc::X86CallPCRel4 => unsafe {
-            let reloc_address = body.add(r.offset as usize) as usize;
-            let reloc_addend = r.addend as isize;
-            let reloc_delta_u64 = (target_func_address as u64)
-                .wrapping_sub(reloc_address as u64)
-                .wrapping_add(reloc_addend as u64);
-            assert!(
-                reloc_delta_u64 as isize <= i32::max_value() as isize,
-                "relocation too large to fit in i32"
-            );
-            write_unaligned(reloc_address as *mut u32, reloc_delta_u64 as u32);
-        },
-        Reloc::X86PCRelRodata4 => {
-            // ignore
-        }
-        Reloc::Arm64Call => unsafe {
-            let reloc_address = body.add(r.offset as usize) as usize;
-            let reloc_addend = r.addend as isize;
-            let reloc_delta = (target_func_address as u64).wrapping_sub(reloc_address as u64);
-            // TODO: come up with a PLT-like solution for longer calls. We can't extend the
-            // code segment at this point, but we could conservatively allocate space at the
-            // end of the function during codegen, a fixed amount per call, to allow for
-            // potential branch islands.
-            assert!((reloc_delta as i64) < (1 << 27));
-            assert!((reloc_delta as i64) >= -(1 << 27));
-            let reloc_delta = reloc_delta as u32;
-            let reloc_delta = reloc_delta.wrapping_add(reloc_addend as u32);
-            let delta_bits = reloc_delta >> 2;
-            let insn = read_unaligned(reloc_address as *const u32);
-            let new_insn = (insn & 0xfc00_0000) | (delta_bits & 0x03ff_ffff);
-            write_unaligned(reloc_address as *mut u32, new_insn);
-        },
-        _ => panic!("unsupported reloc kind"),
+fn to_libcall_address(name: &str) -> Option<usize> {
+    use self::libcalls::*;
+    use wasmtime_environ::for_each_libcall;
+    macro_rules! add_libcall_symbol {
+        [$(($libcall:ident, $export:ident)),*] => {
+            Some(match name {
+                $(
+                    stringify!($export) => $export as usize,
+                )+
+                _ => {
+                    return None;
+                }
+            })
+        };
     }
+    for_each_libcall!(add_libcall_symbol)
 }

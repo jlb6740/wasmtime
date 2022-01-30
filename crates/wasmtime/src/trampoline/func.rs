@@ -1,37 +1,31 @@
 //! Support for a calling of an imported function.
 
-use super::create_handle::create_handle;
-use crate::trampoline::StoreInstanceHandle;
-use crate::{FuncType, Store, Trap};
-use anyhow::{bail, Result};
+use crate::{Engine, FuncType, Trap, ValRaw};
+use anyhow::Result;
 use std::any::Any;
-use std::cmp;
-use std::collections::HashMap;
-use std::mem;
 use std::panic::{self, AssertUnwindSafe};
-use wasmtime_environ::entity::PrimaryMap;
-use wasmtime_environ::isa::TargetIsa;
-use wasmtime_environ::{ir, settings, CompiledFunction, EntityIndex, Module};
-use wasmtime_jit::trampoline::ir::{
-    ExternalName, Function, InstBuilder, MemFlags, StackSlotData, StackSlotKind,
+use std::sync::Arc;
+use wasmtime_environ::{EntityIndex, Module, ModuleType, PrimaryMap, SignatureIndex};
+use wasmtime_jit::{CodeMemory, MmapVec, ProfilingAgent};
+use wasmtime_runtime::{
+    Imports, InstanceAllocationRequest, InstanceAllocator, InstanceHandle,
+    OnDemandInstanceAllocator, StorePtr, VMContext, VMFunctionBody, VMSharedSignatureIndex,
+    VMTrampoline,
 };
-use wasmtime_jit::trampoline::{
-    binemit, pretty_error, Context, FunctionBuilder, FunctionBuilderContext,
-};
-use wasmtime_jit::{native, CodeMemory};
-use wasmtime_runtime::{InstanceHandle, VMContext, VMFunctionBody, VMTrampoline};
 
-struct TrampolineState {
-    func: Box<dyn Fn(*mut VMContext, *mut u128) -> Result<(), Trap>>,
+struct TrampolineState<F> {
+    func: F,
     #[allow(dead_code)]
     code_memory: CodeMemory,
 }
 
-unsafe extern "C" fn stub_fn(
+unsafe extern "C" fn stub_fn<F>(
     vmctx: *mut VMContext,
     caller_vmctx: *mut VMContext,
-    values_vec: *mut u128,
-) {
+    values_vec: *mut ValRaw,
+) where
+    F: Fn(*mut VMContext, *mut ValRaw) -> Result<(), Trap> + 'static,
+{
     // Here we are careful to use `catch_unwind` to ensure Rust panics don't
     // unwind past us. The primary reason for this is that Rust considers it UB
     // to unwind past an `extern "C"` function. Here we are in an `extern "C"`
@@ -46,7 +40,13 @@ unsafe extern "C" fn stub_fn(
     // have any. To prevent leaks we avoid having any local destructors by
     // avoiding local variables.
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        call_stub(vmctx, caller_vmctx, values_vec)
+        // Double-check ourselves in debug mode, but we control
+        // the `Any` here so an unsafe downcast should also
+        // work.
+        let state = (*vmctx).host_state();
+        debug_assert!(state.is::<TrampolineState<F>>());
+        let state = &*(state as *const _ as *const TrampolineState<F>);
+        (state.func)(caller_vmctx, values_vec)
     }));
 
     match result {
@@ -57,246 +57,117 @@ unsafe extern "C" fn stub_fn(
         // call-site, which gets unwrapped in `Trap::from_runtime` later on as we
         // convert from the internal `Trap` type to our own `Trap` type in this
         // crate.
-        Ok(Err(trap)) => wasmtime_runtime::raise_user_trap(Box::new(trap)),
+        Ok(Err(trap)) => wasmtime_runtime::raise_user_trap(trap.into()),
 
         // And finally if the imported function panicked, then we trigger the
         // form of unwinding that's safe to jump over wasm code on all
         // platforms.
         Err(panic) => wasmtime_runtime::resume_panic(panic),
     }
-
-    unsafe fn call_stub(
-        vmctx: *mut VMContext,
-        caller_vmctx: *mut VMContext,
-        values_vec: *mut u128,
-    ) -> Result<(), Trap> {
-        let instance = InstanceHandle::from_vmctx(vmctx);
-        let state = &instance
-            .host_state()
-            .downcast_ref::<TrampolineState>()
-            .expect("state");
-        (state.func)(caller_vmctx, values_vec)
-    }
 }
 
-/// Create a trampoline for invoking a function.
-fn make_trampoline(
-    isa: &dyn TargetIsa,
-    code_memory: &mut CodeMemory,
-    fn_builder_ctx: &mut FunctionBuilderContext,
-    signature: &ir::Signature,
-) -> *mut [VMFunctionBody] {
-    // Mostly reverse copy of the similar method from wasmtime's
-    // wasmtime-jit/src/compiler.rs.
-    let pointer_type = isa.pointer_type();
-    let mut stub_sig = ir::Signature::new(isa.frontend_config().default_call_conv);
+#[cfg(compiler)]
+fn register_trampolines(profiler: &dyn ProfilingAgent, image: &object::File<'_>) {
+    use object::{Object as _, ObjectSection, ObjectSymbol, SectionKind, SymbolKind};
+    let pid = std::process::id();
+    let tid = pid;
 
-    // Add the caller/callee `vmctx` parameters.
-    stub_sig.params.push(ir::AbiParam::special(
-        pointer_type,
-        ir::ArgumentPurpose::VMContext,
-    ));
-
-    // Add the caller `vmctx` parameter.
-    stub_sig.params.push(ir::AbiParam::new(pointer_type));
-
-    // Add the `values_vec` parameter.
-    stub_sig.params.push(ir::AbiParam::new(pointer_type));
-
-    // Compute the size of the values vector. The vmctx and caller vmctx are passed separately.
-    let value_size = mem::size_of::<u128>();
-    let values_vec_len = ((value_size as usize)
-        * cmp::max(signature.params.len() - 2, signature.returns.len()))
-        as u32;
-
-    let mut context = Context::new();
-    context.func = Function::with_name_signature(ExternalName::user(0, 0), signature.clone());
-
-    let ss = context.func.create_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        values_vec_len,
-    ));
-
-    {
-        let mut builder = FunctionBuilder::new(&mut context.func, fn_builder_ctx);
-        let block0 = builder.create_block();
-
-        builder.append_block_params_for_function_params(block0);
-        builder.switch_to_block(block0);
-        builder.seal_block(block0);
-
-        let values_vec_ptr_val = builder.ins().stack_addr(pointer_type, ss, 0);
-        let mflags = MemFlags::trusted();
-        for i in 2..signature.params.len() {
-            if i == 0 {
-                continue;
-            }
-
-            let val = builder.func.dfg.block_params(block0)[i];
-            builder.ins().store(
-                mflags,
-                val,
-                values_vec_ptr_val,
-                ((i - 2) * value_size) as i32,
-            );
-        }
-
-        let block_params = builder.func.dfg.block_params(block0);
-        let vmctx_ptr_val = block_params[0];
-        let caller_vmctx_ptr_val = block_params[1];
-
-        let callee_args = vec![vmctx_ptr_val, caller_vmctx_ptr_val, values_vec_ptr_val];
-
-        let new_sig = builder.import_signature(stub_sig);
-
-        let callee_value = builder
-            .ins()
-            .iconst(pointer_type, stub_fn as *const VMFunctionBody as i64);
-        builder
-            .ins()
-            .call_indirect(new_sig, callee_value, &callee_args);
-
-        let mflags = MemFlags::trusted();
-        let mut results = Vec::new();
-        for (i, r) in signature.returns.iter().enumerate() {
-            let load = builder.ins().load(
-                r.value_type,
-                mflags,
-                values_vec_ptr_val,
-                (i * value_size) as i32,
-            );
-            results.push(load);
-        }
-        builder.ins().return_(&results);
-        builder.finalize()
-    }
-
-    let mut code_buf: Vec<u8> = Vec::new();
-    let mut reloc_sink = binemit::TrampolineRelocSink::default();
-    let mut trap_sink = binemit::NullTrapSink {};
-    let mut stackmap_sink = binemit::NullStackmapSink {};
-    context
-        .compile_and_emit(
-            isa,
-            &mut code_buf,
-            &mut reloc_sink,
-            &mut trap_sink,
-            &mut stackmap_sink,
-        )
-        .map_err(|error| pretty_error(&context.func, Some(isa), error))
-        .expect("compile_and_emit");
-
-    let unwind_info = context
-        .create_unwind_info(isa)
-        .map_err(|error| pretty_error(&context.func, Some(isa), error))
-        .expect("create unwind information");
-
-    code_memory
-        .allocate_for_function(
-            &CompiledFunction {
-                body: code_buf,
-                jt_offsets: context.func.jt_offsets,
-                unwind_info,
-            },
-            reloc_sink.relocs().iter(),
-        )
-        .expect("allocate_for_function")
-}
-
-pub fn create_handle_with_function(
-    ft: &FuncType,
-    func: Box<dyn Fn(*mut VMContext, *mut u128) -> Result<(), Trap>>,
-    store: &Store,
-) -> Result<(StoreInstanceHandle, VMTrampoline)> {
-    let isa = store.engine().config().target_isa();
-
-    let pointer_type = isa.pointer_type();
-    let sig = match ft.get_wasmtime_signature(pointer_type) {
-        Some(sig) => sig,
-        None => bail!("not a supported core wasm signature {:?}", ft),
+    let text_base = match image.sections().find(|s| s.kind() == SectionKind::Text) {
+        Some(section) => match section.data() {
+            Ok(data) => data.as_ptr() as usize,
+            Err(_) => return,
+        },
+        None => return,
     };
 
-    let mut fn_builder_ctx = FunctionBuilderContext::new();
-    let mut module = Module::new();
-    let mut finished_functions = PrimaryMap::new();
-    let mut trampolines = HashMap::new();
-    let mut code_memory = CodeMemory::new();
+    for sym in image.symbols() {
+        if !sym.is_definition() {
+            continue;
+        }
+        if sym.kind() != SymbolKind::Text {
+            continue;
+        }
+        let address = sym.address();
+        let size = sym.size();
+        if address == 0 || size == 0 {
+            continue;
+        }
+        if let Ok(name) = sym.name() {
+            let addr = text_base + address as usize;
+            profiler.load_single_trampoline(name, addr as *const u8, size as usize, pid, tid);
+        }
+    }
+}
 
-    // First up we manufacture a trampoline which has the ABI specified by `ft`
-    // and calls into `stub_fn`...
-    let sig_id = module
-        .local
-        .signatures
-        .push((ft.to_wasm_func_type(), sig.clone()));
-    let func_id = module.local.functions.push(sig_id);
-    module
-        .exports
-        .insert("trampoline".to_string(), EntityIndex::Function(func_id));
-    let trampoline = make_trampoline(isa.as_ref(), &mut code_memory, &mut fn_builder_ctx, &sig);
-    finished_functions.push(trampoline);
-
-    // ... and then we also need a trampoline with the standard "trampoline ABI"
-    // which enters into the ABI specified by `ft`. Note that this is only used
-    // if `Func::call` is called on an object created by `Func::new`.
-    let trampoline = wasmtime_jit::make_trampoline(
-        &*isa,
-        &mut code_memory,
-        &mut fn_builder_ctx,
-        &sig,
-        mem::size_of::<u128>(),
+#[cfg(compiler)]
+pub fn create_function<F>(
+    ft: &FuncType,
+    func: F,
+    engine: &Engine,
+) -> Result<(InstanceHandle, VMTrampoline)>
+where
+    F: Fn(*mut VMContext, *mut ValRaw) -> Result<(), Trap> + Send + Sync + 'static,
+{
+    let mut obj = engine.compiler().object()?;
+    let (t1, t2) = engine.compiler().emit_trampoline_obj(
+        ft.as_wasm_func_type(),
+        stub_fn::<F> as usize,
+        &mut obj,
     )?;
-    let sig_id = store.register_signature(ft.to_wasm_func_type(), sig);
-    trampolines.insert(sig_id, trampoline);
+    let obj = MmapVec::from_obj(obj)?;
 
-    // Next up we wrap everything up into an `InstanceHandle` by publishing our
-    // code memory (makes it executable) and ensuring all our various bits of
-    // state make it into the instance constructors.
-    code_memory.publish(isa.as_ref());
-    let trampoline_state = TrampolineState { func, code_memory };
-    create_handle(
-        module,
-        store,
-        finished_functions,
-        trampolines,
-        Box::new(trampoline_state),
-    )
-    .map(|instance| (instance, trampoline))
+    // Copy the results of JIT compilation into executable memory, and this will
+    // also take care of unwind table registration.
+    let mut code_memory = CodeMemory::new(obj);
+    let code = code_memory.publish()?;
+
+    register_trampolines(engine.config().profiler.as_ref(), &code.obj);
+
+    // Extract the host/wasm trampolines from the results of compilation since
+    // we know their start/length.
+    let host_trampoline = code.text[t1.start as usize..][..t1.length as usize].as_ptr();
+    let wasm_trampoline = &code.text[t2.start as usize..][..t2.length as usize];
+    let wasm_trampoline = wasm_trampoline as *const [u8] as *mut [VMFunctionBody];
+
+    let sig = engine.signatures().register(ft.as_wasm_func_type());
+
+    unsafe {
+        let instance = create_raw_function(
+            wasm_trampoline,
+            sig,
+            Box::new(TrampolineState { func, code_memory }),
+        )?;
+        let host_trampoline = std::mem::transmute::<*const u8, VMTrampoline>(host_trampoline);
+        Ok((instance, host_trampoline))
+    }
 }
 
-pub unsafe fn create_handle_with_raw_function(
-    ft: &FuncType,
+pub unsafe fn create_raw_function(
     func: *mut [VMFunctionBody],
-    trampoline: VMTrampoline,
-    store: &Store,
-    state: Box<dyn Any>,
-) -> Result<StoreInstanceHandle> {
-    let isa = {
-        let isa_builder = native::builder();
-        let flag_builder = settings::builder();
-        isa_builder.finish(settings::Flags::new(flag_builder))
-    };
-
-    let pointer_type = isa.pointer_type();
-    let sig = match ft.get_wasmtime_signature(pointer_type) {
-        Some(sig) => sig,
-        None => bail!("not a supported core wasm signature {:?}", ft),
-    };
-
+    sig: VMSharedSignatureIndex,
+    host_state: Box<dyn Any + Send + Sync>,
+) -> Result<InstanceHandle> {
     let mut module = Module::new();
-    let mut finished_functions = PrimaryMap::new();
-    let mut trampolines = HashMap::new();
+    let mut functions = PrimaryMap::new();
+    functions.push(Default::default());
 
-    let sig_id = module
-        .local
-        .signatures
-        .push((ft.to_wasm_func_type(), sig.clone()));
-    let func_id = module.local.functions.push(sig_id);
+    let sig_id = SignatureIndex::from_u32(u32::max_value() - 1);
+    module.types.push(ModuleType::Function(sig_id));
+    let func_id = module.functions.push(sig_id);
     module
         .exports
-        .insert("trampoline".to_string(), EntityIndex::Function(func_id));
-    finished_functions.push(func);
-    let sig_id = store.register_signature(ft.to_wasm_func_type(), sig);
-    trampolines.insert(sig_id, trampoline);
+        .insert(String::new(), EntityIndex::Function(func_id));
 
-    create_handle(module, store, finished_functions, trampolines, state)
+    Ok(
+        OnDemandInstanceAllocator::default().allocate(InstanceAllocationRequest {
+            module: Arc::new(module),
+            functions: &functions,
+            image_base: (*func).as_ptr() as usize,
+            imports: Imports::default(),
+            shared_signatures: sig.into(),
+            host_state,
+            store: StorePtr::empty(),
+            wasm_data: &[],
+        })?,
+    )
 }

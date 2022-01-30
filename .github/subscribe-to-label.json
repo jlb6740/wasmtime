@@ -1,6 +1,6 @@
 {
-  "bnjbvr": ["cranelift"],
-  "fitzgen": ["fuzzing", "cranelift:area:peepmatic"],
+  "cfallin": ["isle"],
+  "fitzgen": ["fuzzing", "isle", "wasmtime:ref-types"],
   "peterhuene": ["wasmtime:api", "wasmtime:c-api"],
   "kubkon": ["wasi"]
 }

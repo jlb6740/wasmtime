@@ -21,7 +21,7 @@
 //! The `VMExternData` struct is *preceded* by the dynamically-sized value boxed
 //! up and referenced by one or more `VMExternRef`s:
 //!
-//! ```ignore
+//! ```text
 //!      ,-------------------------------------------------------.
 //!      |                                                       |
 //!      V                                                       |
@@ -97,20 +97,19 @@
 //!
 //! For more general information on deferred reference counting, see *An
 //! Examination of Deferred Reference Counting and Cycle Detection* by Quinane:
-//! https://openresearch-repository.anu.edu.au/bitstream/1885/42030/2/hon-thesis.pdf
+//! <https://openresearch-repository.anu.edu.au/bitstream/1885/42030/2/hon-thesis.pdf>
 
-use std::alloc::Layout;
 use std::any::Any;
-use std::cell::{Cell, RefCell, UnsafeCell};
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::cell::UnsafeCell;
+use std::cmp;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::mem;
 use std::ops::Deref;
 use std::ptr::{self, NonNull};
-use std::rc::Rc;
-use wasmtime_environ::{ir::Stackmap, StackMapInformation};
+use std::sync::atomic::{self, AtomicUsize, Ordering};
+use std::{alloc::Layout, sync::Arc};
+use wasmtime_environ::StackMap;
 
 /// An external reference to some opaque data.
 ///
@@ -147,17 +146,16 @@ use wasmtime_environ::{ir::Stackmap, StackMapInformation};
 /// let file = std::fs::File::create("some/file/path")?;
 ///
 /// // Wrap the file up as an `VMExternRef` that can be passed to Wasm.
-/// let extern_ref_to_file = VMExternRef::new(RefCell::new(file));
+/// let extern_ref_to_file = VMExternRef::new(file);
 ///
 /// // `VMExternRef`s dereference to `dyn Any`, so you can use `Any` methods to
 /// // perform runtime type checks and downcasts.
 ///
-/// assert!(extern_ref_to_file.is::<RefCell<std::fs::File>>());
+/// assert!(extern_ref_to_file.is::<std::fs::File>());
 /// assert!(!extern_ref_to_file.is::<String>());
 ///
-/// if let Some(file) = extern_ref_to_file.downcast_ref::<RefCell<std::fs::File>>() {
+/// if let Some(mut file) = extern_ref_to_file.downcast_ref::<std::fs::File>() {
 ///     use std::io::Write;
-///     let mut file = file.borrow_mut();
 ///     writeln!(&mut file, "Hello, `VMExternRef`!")?;
 /// }
 /// # Ok(())
@@ -167,8 +165,12 @@ use wasmtime_environ::{ir::Stackmap, StackMapInformation};
 #[repr(transparent)]
 pub struct VMExternRef(NonNull<VMExternData>);
 
+// Data contained is always Send+Sync so these should be safe.
+unsafe impl Send for VMExternRef {}
+unsafe impl Sync for VMExternRef {}
+
 #[repr(C)]
-struct VMExternData {
+pub(crate) struct VMExternData {
     // Implicit, dynamically-sized member that always preceded an
     // `VMExternData`.
     //
@@ -182,11 +184,11 @@ struct VMExternData {
     /// Note: this field's offset must be kept in sync with
     /// `wasmtime_environ::VMOffsets::vm_extern_data_ref_count()` which is
     /// currently always zero.
-    ref_count: UnsafeCell<usize>,
+    ref_count: AtomicUsize,
 
     /// Always points to the implicit, dynamically-sized `value` member that
     /// precedes this `VMExternData`.
-    value_ptr: NonNull<dyn Any>,
+    value_ptr: NonNull<dyn Any + Send + Sync>,
 }
 
 impl Clone for VMExternRef {
@@ -201,13 +203,23 @@ impl Drop for VMExternRef {
     #[inline]
     fn drop(&mut self) {
         let data = self.extern_data();
-        data.decrement_ref_count();
-        if data.get_ref_count() == 0 {
-            // Drop our live reference to `data` before we drop it itself.
-            drop(data);
-            unsafe {
-                VMExternData::drop_and_dealloc(self.0);
-            }
+
+        // Note that the memory orderings here also match the standard library
+        // itself. Documentation is more available in the implementation of
+        // `Arc`, but the general idea is that this is a special pattern allowed
+        // by the C standard with atomic orderings where we "release" for all
+        // the decrements and only the final decrementer performs an acquire
+        // fence. This properly ensures that the final thread, which actually
+        // destroys the data, sees all the updates from all other threads.
+        if data.ref_count.fetch_sub(1, Ordering::Release) != 1 {
+            return;
+        }
+        atomic::fence(Ordering::Acquire);
+
+        // Drop our live reference to `data` before we drop it itself.
+        drop(data);
+        unsafe {
+            VMExternData::drop_and_dealloc(self.0);
         }
     }
 }
@@ -237,13 +249,13 @@ impl VMExternData {
     }
 
     /// Drop the inner value and then free this `VMExternData` heap allocation.
-    unsafe fn drop_and_dealloc(mut data: NonNull<VMExternData>) {
+    pub(crate) unsafe fn drop_and_dealloc(mut data: NonNull<VMExternData>) {
         // Note: we introduce a block scope so that we drop the live
         // reference to the data before we free the heap allocation it
         // resides within after this block.
         let (alloc_ptr, layout) = {
             let data = data.as_mut();
-            debug_assert_eq!(data.get_ref_count(), 0);
+            debug_assert_eq!(data.ref_count.load(Ordering::SeqCst), 0);
 
             // Same thing, but for the dropping the reference to `value` before
             // we drop it itself.
@@ -263,24 +275,15 @@ impl VMExternData {
     }
 
     #[inline]
-    fn get_ref_count(&self) -> usize {
-        unsafe { *self.ref_count.get() }
-    }
-
-    #[inline]
     fn increment_ref_count(&self) {
-        unsafe {
-            let count = self.ref_count.get();
-            *count += 1;
-        }
-    }
-
-    #[inline]
-    fn decrement_ref_count(&self) {
-        unsafe {
-            let count = self.ref_count.get();
-            *count -= 1;
-        }
+        // This is only using during cloning operations, and like the standard
+        // library we use `Relaxed` here. The rationale is better documented in
+        // libstd's implementation of `Arc`, but the general gist is that we're
+        // creating a new pointer for our own thread, so there's no need to have
+        // any synchronization with orderings. The synchronization with other
+        // threads with respect to orderings happens when the pointer is sent to
+        // another thread.
+        self.ref_count.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -295,7 +298,7 @@ impl VMExternRef {
     /// Wrap the given value inside an `VMExternRef`.
     pub fn new<T>(value: T) -> VMExternRef
     where
-        T: 'static + Any,
+        T: 'static + Any + Send + Sync,
     {
         VMExternRef::new_with(|| value)
     }
@@ -303,7 +306,7 @@ impl VMExternRef {
     /// Construct a new `VMExternRef` in place by invoking `make_value`.
     pub fn new_with<T>(make_value: impl FnOnce() -> T) -> VMExternRef
     where
-        T: 'static + Any,
+        T: 'static + Any + Send + Sync,
     {
         unsafe {
             let (layout, footer_offset) =
@@ -317,19 +320,14 @@ impl VMExternRef {
             let value_ptr = alloc_ptr.cast::<T>();
             ptr::write(value_ptr.as_ptr(), make_value());
 
-            let value_ref: &T = value_ptr.as_ref();
-            let value_ref: &dyn Any = value_ref as _;
-            let value_ptr: *const dyn Any = value_ref as _;
-            let value_ptr: *mut dyn Any = value_ptr as _;
-            let value_ptr = NonNull::new_unchecked(value_ptr);
-
             let extern_data_ptr =
                 alloc_ptr.cast::<u8>().as_ptr().add(footer_offset) as *mut VMExternData;
             ptr::write(
                 extern_data_ptr,
                 VMExternData {
-                    ref_count: UnsafeCell::new(1),
-                    value_ptr,
+                    ref_count: AtomicUsize::new(1),
+                    // Cast from `*mut T` to `*mut dyn Any` here.
+                    value_ptr: NonNull::new_unchecked(value_ptr.as_ptr()),
                 },
             );
 
@@ -346,13 +344,41 @@ impl VMExternRef {
     ///  Nor does this method increment the reference count. You must ensure
     ///  that `self` (or some other clone of `self`) stays alive until
     ///  `clone_from_raw` is called.
+    #[inline]
     pub fn as_raw(&self) -> *mut u8 {
         let ptr = self.0.cast::<u8>().as_ptr();
         ptr
     }
 
+    /// Consume this `VMExternRef` into a raw, untyped pointer.
+    ///
+    /// # Safety
+    ///
+    /// This method forgets self, so it is possible to create a leak of the
+    /// underlying reference counted data if not used carefully.
+    ///
+    /// Use `from_raw` to recreate the `VMExternRef`.
+    pub unsafe fn into_raw(self) -> *mut u8 {
+        let ptr = self.0.cast::<u8>().as_ptr();
+        std::mem::forget(self);
+        ptr
+    }
+
     /// Recreate a `VMExternRef` from a pointer returned from a previous call to
-    /// `VMExternRef::as_raw`.
+    /// `as_raw`.
+    ///
+    /// # Safety
+    ///
+    /// Unlike `clone_from_raw`, this does not increment the reference count of the
+    /// underlying data.  It is not safe to continue to use the pointer passed to this
+    /// function.
+    pub unsafe fn from_raw(ptr: *mut u8) -> Self {
+        debug_assert!(!ptr.is_null());
+        VMExternRef(NonNull::new_unchecked(ptr).cast())
+    }
+
+    /// Recreate a `VMExternRef` from a pointer returned from a previous call to
+    /// `as_raw`.
     ///
     /// # Safety
     ///
@@ -370,8 +396,11 @@ impl VMExternRef {
     }
 
     /// Get the strong reference count for this `VMExternRef`.
+    ///
+    /// Note that this loads with a `SeqCst` ordering to synchronize with other
+    /// threads.
     pub fn strong_count(&self) -> usize {
-        self.extern_data().get_ref_count()
+        self.extern_data().ref_count.load(Ordering::SeqCst)
     }
 
     #[inline]
@@ -393,7 +422,7 @@ impl VMExternRef {
     /// or `PartialEq` implementation of the pointed-to values.
     #[inline]
     pub fn eq(a: &Self, b: &Self) -> bool {
-        ptr::eq(a.0.as_ptr() as *const _, b.0.as_ptr() as *const _)
+        ptr::eq(a.0.as_ptr(), b.0.as_ptr())
     }
 
     /// Hash a given `VMExternRef`.
@@ -405,7 +434,7 @@ impl VMExternRef {
     where
         H: Hasher,
     {
-        ptr::hash(externref.0.as_ptr() as *const _, hasher);
+        ptr::hash(externref.0.as_ptr(), hasher);
     }
 
     /// Compare two `VMExternRef`s.
@@ -414,7 +443,7 @@ impl VMExternRef {
     /// semantics, and so only pointers are compared, and doesn't use any `Cmp`
     /// or `PartialCmp` implementation of the pointed-to values.
     #[inline]
-    pub fn cmp(a: &Self, b: &Self) -> Ordering {
+    pub fn cmp(a: &Self, b: &Self) -> cmp::Ordering {
         let a = a.0.as_ptr() as usize;
         let b = b.0.as_ptr() as usize;
         a.cmp(&b)
@@ -461,8 +490,47 @@ type TableElem = UnsafeCell<Option<VMExternRef>>;
 ///
 /// Under the covers, this is a simple bump allocator that allows duplicate
 /// entries. Deduplication happens at GC time.
-#[repr(C)]
+#[repr(C)] // `alloc` must be the first member, it's accessed from JIT code.
 pub struct VMExternRefActivationsTable {
+    /// Structures used to perform fast bump allocation of storage of externref
+    /// values.
+    ///
+    /// This is the only member of this structure accessed from JIT code.
+    alloc: VMExternRefTableAlloc,
+
+    /// When unioned with `chunk`, this is an over-approximation of the GC roots
+    /// on the stack, inside Wasm frames.
+    ///
+    /// This is used by slow-path insertion, and when a GC cycle finishes, is
+    /// re-initialized to the just-discovered precise set of stack roots (which
+    /// immediately becomes an over-approximation again as soon as Wasm runs and
+    /// potentially drops references).
+    over_approximated_stack_roots: HashSet<VMExternRefWithTraits>,
+
+    /// The precise set of on-stack, inside-Wasm GC roots that we discover via
+    /// walking the stack and interpreting stack maps.
+    ///
+    /// This is *only* used inside the `gc` function, and is empty otherwise. It
+    /// is just part of this struct so that we can reuse the allocation, rather
+    /// than create a new hash set every GC.
+    precise_stack_roots: HashSet<VMExternRefWithTraits>,
+
+    /// A pointer to the youngest host stack frame before we called
+    /// into Wasm for the first time. When walking the stack in garbage
+    /// collection, if we don't find this frame, then we failed to walk every
+    /// Wasm stack frame, which means we failed to find all on-stack,
+    /// inside-a-Wasm-frame roots, and doing a GC could lead to freeing one of
+    /// those missed roots, and use after free.
+    stack_canary: Option<usize>,
+
+    /// A debug-only field for asserting that we are in a region of code where
+    /// GC is okay to preform.
+    #[cfg(debug_assertions)]
+    gc_okay: bool,
+}
+
+#[repr(C)] // This is accessed from JIT code.
+struct VMExternRefTableAlloc {
     /// Bump-allocation finger within the `chunk`.
     ///
     /// NB: this is an `UnsafeCell` because it is written to by compiled Wasm
@@ -476,32 +544,21 @@ pub struct VMExternRefActivationsTable {
     end: NonNull<TableElem>,
 
     /// Bump allocation chunk that stores fast-path insertions.
+    ///
+    /// This is not accessed from JIT code.
     chunk: Box<[TableElem]>,
+}
 
-    /// When unioned with `chunk`, this is an over-approximation of the GC roots
-    /// on the stack, inside Wasm frames.
-    ///
-    /// This is used by slow-path insertion, and when a GC cycle finishes, is
-    /// re-initialized to the just-discovered precise set of stack roots (which
-    /// immediately becomes an over-approximation again as soon as Wasm runs and
-    /// potentially drops references).
-    over_approximated_stack_roots: RefCell<HashSet<VMExternRefWithTraits>>,
+// This gets around the usage of `UnsafeCell` throughout the internals of this
+// allocator, but the storage should all be Send/Sync and synchronization isn't
+// necessary since operations require `&mut self`.
+unsafe impl Send for VMExternRefTableAlloc {}
+unsafe impl Sync for VMExternRefTableAlloc {}
 
-    /// The precise set of on-stack, inside-Wasm GC roots that we discover via
-    /// walking the stack and interpreting stack maps.
-    ///
-    /// This is *only* used inside the `gc` function, and is empty otherwise. It
-    /// is just part of this struct so that we can reuse the allocation, rather
-    /// than create a new hash set every GC.
-    precise_stack_roots: RefCell<HashSet<VMExternRefWithTraits>>,
-
-    /// A pointer to a `u8` on the youngest host stack frame before we called
-    /// into Wasm for the first time. When walking the stack in garbage
-    /// collection, if we don't find this frame, then we failed to walk every
-    /// Wasm stack frame, which means we failed to find all on-stack,
-    /// inside-a-Wasm-frame roots, and doing a GC could lead to freeing one of
-    /// those missed roots, and use after free.
-    stack_canary: Cell<Option<NonNull<u8>>>,
+fn _assert_send_sync() {
+    fn _assert<T: Send + Sync>() {}
+    _assert::<VMExternRefActivationsTable>();
+    _assert::<VMExternRef>();
 }
 
 impl VMExternRefActivationsTable {
@@ -509,23 +566,35 @@ impl VMExternRefActivationsTable {
 
     /// Create a new `VMExternRefActivationsTable`.
     pub fn new() -> Self {
-        let chunk = Self::new_chunk(Self::CHUNK_SIZE);
-        let next = chunk.as_ptr() as *mut TableElem;
+        let mut chunk = Self::new_chunk(Self::CHUNK_SIZE);
+        let next = chunk.as_mut_ptr().cast::<TableElem>();
         let end = unsafe { next.add(chunk.len()) };
 
         VMExternRefActivationsTable {
-            next: UnsafeCell::new(NonNull::new(next).unwrap()),
-            end: NonNull::new(end).unwrap(),
-            chunk,
-            over_approximated_stack_roots: RefCell::new(HashSet::with_capacity(Self::CHUNK_SIZE)),
-            precise_stack_roots: RefCell::new(HashSet::with_capacity(Self::CHUNK_SIZE)),
-            stack_canary: Cell::new(None),
+            alloc: VMExternRefTableAlloc {
+                next: UnsafeCell::new(NonNull::new(next).unwrap()),
+                end: NonNull::new(end).unwrap(),
+                chunk,
+            },
+            over_approximated_stack_roots: HashSet::with_capacity(Self::CHUNK_SIZE),
+            precise_stack_roots: HashSet::with_capacity(Self::CHUNK_SIZE),
+            stack_canary: None,
+            #[cfg(debug_assertions)]
+            gc_okay: true,
         }
     }
 
     fn new_chunk(size: usize) -> Box<[UnsafeCell<Option<VMExternRef>>]> {
         assert!(size >= Self::CHUNK_SIZE);
         (0..size).map(|_| UnsafeCell::new(None)).collect()
+    }
+
+    /// Get the available capacity in the bump allocation chunk.
+    #[inline]
+    pub fn bump_capacity_remaining(&self) -> usize {
+        let end = self.alloc.end.as_ptr() as usize;
+        let next = unsafe { *self.alloc.next.get() };
+        end - next.as_ptr() as usize
     }
 
     /// Try and insert a `VMExternRef` into this table.
@@ -538,10 +607,10 @@ impl VMExternRefActivationsTable {
     /// `insert_slow_path` to infallibly insert the reference (potentially
     /// allocating additional space in the table to hold it).
     #[inline]
-    pub fn try_insert(&self, externref: VMExternRef) -> Result<(), VMExternRef> {
+    pub fn try_insert(&mut self, externref: VMExternRef) -> Result<(), VMExternRef> {
         unsafe {
-            let next = *self.next.get();
-            if next == self.end {
+            let next = *self.alloc.next.get();
+            if next == self.alloc.end {
                 return Err(externref);
             }
 
@@ -552,8 +621,8 @@ impl VMExternRefActivationsTable {
             ptr::write(next.as_ptr(), UnsafeCell::new(Some(externref)));
 
             let next = NonNull::new_unchecked(next.as_ptr().add(1));
-            debug_assert!(next <= self.end);
-            *self.next.get() = next;
+            debug_assert!(next <= self.alloc.end);
+            *self.alloc.next.get() = next;
 
             Ok(())
         }
@@ -567,333 +636,176 @@ impl VMExternRefActivationsTable {
     /// The same as `gc`.
     #[inline]
     pub unsafe fn insert_with_gc(
-        &self,
+        &mut self,
         externref: VMExternRef,
-        stack_maps_registry: &StackMapRegistry,
+        module_info_lookup: &dyn ModuleInfoLookup,
     ) {
+        #[cfg(debug_assertions)]
+        assert!(self.gc_okay);
+
         if let Err(externref) = self.try_insert(externref) {
-            self.gc_and_insert_slow(externref, stack_maps_registry);
+            self.gc_and_insert_slow(externref, module_info_lookup);
         }
     }
 
     #[inline(never)]
     unsafe fn gc_and_insert_slow(
-        &self,
+        &mut self,
         externref: VMExternRef,
-        stack_maps_registry: &StackMapRegistry,
+        module_info_lookup: &dyn ModuleInfoLookup,
     ) {
-        gc(stack_maps_registry, self);
+        gc(module_info_lookup, self);
 
         // Might as well insert right into the hash set, rather than the bump
         // chunk, since we are already on a slow path and we get de-duplication
         // this way.
-        let mut roots = self.over_approximated_stack_roots.borrow_mut();
-        roots.insert(VMExternRefWithTraits(externref));
+        self.over_approximated_stack_roots
+            .insert(VMExternRefWithTraits(externref));
+    }
+
+    /// Insert a reference into the table, without ever performing GC.
+    #[inline]
+    pub fn insert_without_gc(&mut self, externref: VMExternRef) {
+        if let Err(externref) = self.try_insert(externref) {
+            self.insert_slow_without_gc(externref);
+        }
+    }
+
+    #[inline(never)]
+    fn insert_slow_without_gc(&mut self, externref: VMExternRef) {
+        self.over_approximated_stack_roots
+            .insert(VMExternRefWithTraits(externref));
     }
 
     fn num_filled_in_bump_chunk(&self) -> usize {
-        let next = unsafe { *self.next.get() };
-        let bytes_unused = (self.end.as_ptr() as usize) - (next.as_ptr() as usize);
+        let next = unsafe { *self.alloc.next.get() };
+        let bytes_unused = (self.alloc.end.as_ptr() as usize) - (next.as_ptr() as usize);
         let slots_unused = bytes_unused / mem::size_of::<TableElem>();
-        self.chunk.len().saturating_sub(slots_unused)
+        self.alloc.chunk.len().saturating_sub(slots_unused)
     }
 
     fn elements(&self, mut f: impl FnMut(&VMExternRef)) {
-        let roots = self.over_approximated_stack_roots.borrow();
-        for elem in roots.iter() {
+        for elem in self.over_approximated_stack_roots.iter() {
             f(&elem.0);
         }
 
         // The bump chunk is not all the way full, so we only iterate over its
         // filled-in slots.
         let num_filled = self.num_filled_in_bump_chunk();
-        for slot in self.chunk.iter().take(num_filled) {
+        for slot in self.alloc.chunk.iter().take(num_filled) {
             if let Some(elem) = unsafe { &*slot.get() } {
                 f(elem);
             }
         }
     }
 
-    fn insert_precise_stack_root(&self, root: NonNull<VMExternData>) {
-        let mut precise_stack_roots = self.precise_stack_roots.borrow_mut();
-        let root = unsafe { VMExternRef::clone_from_raw(root.as_ptr() as *mut _) };
+    fn insert_precise_stack_root(
+        precise_stack_roots: &mut HashSet<VMExternRefWithTraits>,
+        root: NonNull<VMExternData>,
+    ) {
+        let root = unsafe { VMExternRef::clone_from_raw(root.as_ptr().cast()) };
         precise_stack_roots.insert(VMExternRefWithTraits(root));
     }
 
     /// Sweep the bump allocation table after we've discovered our precise stack
     /// roots.
-    fn sweep(&self) {
+    fn sweep(&mut self) {
         // Sweep our bump chunk.
         let num_filled = self.num_filled_in_bump_chunk();
-        for slot in self.chunk.iter().take(num_filled) {
+        unsafe {
+            *self.alloc.next.get() = self.alloc.end;
+        }
+        for slot in self.alloc.chunk.iter().take(num_filled) {
             unsafe {
                 *slot.get() = None;
             }
         }
         debug_assert!(
-            self.chunk
+            self.alloc
+                .chunk
                 .iter()
                 .all(|slot| unsafe { (*slot.get()).as_ref().is_none() }),
             "after sweeping the bump chunk, all slots should be `None`"
         );
 
-        // Reset our `next` bump allocation finger.
+        // Reset our `next` finger to the start of the bump allocation chunk.
         unsafe {
-            let next = self.chunk.as_ptr() as *mut TableElem;
+            let next = self.alloc.chunk.as_mut_ptr().cast::<TableElem>();
             debug_assert!(!next.is_null());
-            *self.next.get() = NonNull::new_unchecked(next);
+            *self.alloc.next.get() = NonNull::new_unchecked(next);
         }
 
-        // The current `precise_roots` becomes our new over-appoximated set for
-        // the next GC cycle.
-        let mut precise_roots = self.precise_stack_roots.borrow_mut();
-        let mut over_approximated = self.over_approximated_stack_roots.borrow_mut();
-        mem::swap(&mut *precise_roots, &mut *over_approximated);
+        // The current `precise_stack_roots` becomes our new over-appoximated
+        // set for the next GC cycle.
+        mem::swap(
+            &mut self.precise_stack_roots,
+            &mut self.over_approximated_stack_roots,
+        );
 
-        // And finally, the new `precise_roots` should be cleared and remain
-        // empty until the next GC cycle.
-        precise_roots.clear();
+        // And finally, the new `precise_stack_roots` should be cleared and
+        // remain empty until the next GC cycle.
+        //
+        // Note that this may run arbitrary code as we run externref
+        // destructors. Because of our `&mut` borrow above on this table,
+        // though, we're guaranteed that nothing will touch this table.
+        self.precise_stack_roots.clear();
     }
 
-    /// Set the stack canary around a call into Wasm.
+    /// Fetches the current value of this table's stack canary.
     ///
-    /// The return value should not be dropped until after the Wasm call has
-    /// returned.
+    /// This should only be used in conjunction with setting the stack canary
+    /// below if the return value is `None` typically. This is called from RAII
+    /// guards in `wasmtime::func::invoke_wasm_and_catch_traps`.
     ///
-    /// While this method is always safe to call (or not call), it is unsafe to
-    /// call the `wasmtime_runtime::gc` function unless this method is called at
-    /// the proper times and its return value properly outlives its Wasm call.
-    ///
-    /// For `gc` to be safe, this is only *strictly required* to surround the
-    /// oldest host-->Wasm stack frame transition on this thread, but repeatedly
-    /// calling it is idempotent and cheap, so it is recommended to call this
-    /// for every host-->Wasm call.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use wasmtime_runtime::*;
-    ///
-    /// # let get_table_from_somewhere = || unimplemented!();
-    /// let table: &VMExternRefActivationsTable = get_table_from_somewhere();
-    ///
-    /// // Set the canary before a Wasm call. The canary should always be a
-    /// // local on the stack.
-    /// let canary = 0;
-    /// let auto_reset_canary = table.set_stack_canary(&canary);
-    ///
-    /// // Do the call into Wasm.
-    /// # let call_into_wasm = || unimplemented!();
-    /// call_into_wasm();
-    ///
-    /// // Only drop the value returned by `set_stack_canary` after the Wasm
-    /// // call has returned.
-    /// drop(auto_reset_canary);
-    /// ```
-    pub fn set_stack_canary<'a>(&'a self, canary: &u8) -> impl Drop + 'a {
-        let should_reset = if self.stack_canary.get().is_none() {
-            let canary = canary as *const u8 as *mut u8;
-            self.stack_canary.set(Some(unsafe {
-                debug_assert!(!canary.is_null());
-                NonNull::new_unchecked(canary)
-            }));
-            true
-        } else {
-            false
-        };
-
-        return AutoResetCanary {
-            table: self,
-            should_reset,
-        };
-
-        struct AutoResetCanary<'a> {
-            table: &'a VMExternRefActivationsTable,
-            should_reset: bool,
-        }
-
-        impl Drop for AutoResetCanary<'_> {
-            fn drop(&mut self) {
-                if self.should_reset {
-                    debug_assert!(self.table.stack_canary.get().is_some());
-                    self.table.stack_canary.set(None);
-                }
-            }
-        }
-    }
-}
-
-/// A registry of stack maps for currently active Wasm modules.
-#[derive(Default)]
-pub struct StackMapRegistry {
-    inner: RefCell<StackMapRegistryInner>,
-}
-
-#[derive(Default)]
-struct StackMapRegistryInner {
-    /// A map from the highest pc in a module, to its stack maps.
-    ///
-    /// For details, see the comment above `GlobalFrameInfo::ranges`.
-    ranges: BTreeMap<usize, ModuleStackMaps>,
-}
-
-#[derive(Debug)]
-struct ModuleStackMaps {
-    /// The range of PCs that this module covers. Different modules must always
-    /// have distinct ranges.
-    range: std::ops::Range<usize>,
-
-    /// A map from a PC in this module (that is a GC safepoint) to its
-    /// associated stack map.
-    pc_to_stack_map: Vec<(usize, Rc<Stackmap>)>,
-}
-
-impl StackMapRegistry {
-    /// Register the stack maps for a given module.
-    ///
-    /// The stack maps should be given as an iterator over a function's PC range
-    /// in memory (that is, where the JIT actually allocated and emitted the
-    /// function's code at), and the stack maps and code offsets within that
-    /// range for each of its GC safepoints.
-    pub fn register_stack_maps<'a>(
-        &self,
-        stack_maps: impl IntoIterator<Item = (std::ops::Range<usize>, &'a [StackMapInformation])>,
-    ) {
-        let mut min = usize::max_value();
-        let mut max = 0;
-        let mut pc_to_stack_map = vec![];
-
-        for (range, infos) in stack_maps {
-            let len = range.end - range.start;
-
-            min = std::cmp::min(min, range.start);
-            max = std::cmp::max(max, range.end);
-
-            for info in infos {
-                assert!((info.code_offset as usize) < len);
-                pc_to_stack_map.push((
-                    range.start + (info.code_offset as usize),
-                    Rc::new(info.stack_map.clone()),
-                ));
-            }
-        }
-
-        if pc_to_stack_map.is_empty() {
-            // Nothing to register.
-            return;
-        }
-
-        let module_stack_maps = ModuleStackMaps {
-            range: min..max,
-            pc_to_stack_map,
-        };
-
-        let mut inner = self.inner.borrow_mut();
-
-        // Check if we've already registered this module.
-        if let Some(existing_module) = inner.ranges.get(&max) {
-            assert_eq!(existing_module.range, module_stack_maps.range);
-            debug_assert_eq!(
-                existing_module.pc_to_stack_map,
-                module_stack_maps.pc_to_stack_map,
-            );
-            return;
-        }
-
-        // Assert that this chunk of ranges doesn't collide with any other known
-        // chunks.
-        if let Some((_, prev)) = inner.ranges.range(max..).next() {
-            assert!(prev.range.start > max);
-        }
-        if let Some((prev_end, _)) = inner.ranges.range(..=min).next_back() {
-            assert!(*prev_end < min);
-        }
-
-        let old = inner.ranges.insert(max, module_stack_maps);
-        assert!(old.is_none());
+    /// For more information on canaries see the gc functions below.
+    #[inline]
+    pub fn stack_canary(&self) -> Option<usize> {
+        self.stack_canary
     }
 
-    /// Lookup the stack map for the given PC, if any.
-    pub fn lookup_stack_map(&self, pc: usize) -> Option<Rc<Stackmap>> {
-        let inner = self.inner.borrow();
-        let stack_maps = inner.module_stack_maps(pc)?;
+    /// Sets the current value of the stack canary.
+    ///
+    /// This is called from RAII guards in
+    /// `wasmtime::func::invoke_wasm_and_catch_traps`. This is used to update
+    /// the stack canary to a concrete value and then reset it back to `None`
+    /// when wasm is finished.
+    ///
+    /// For more information on canaries see the gc functions below.
+    #[inline]
+    pub fn set_stack_canary(&mut self, canary: Option<usize>) {
+        self.stack_canary = canary;
+    }
 
-        // Do a binary search to find the stack map for the given PC.
-        //
-        // Because GC safepoints are technically only associated with a single
-        // PC, we should ideally only care about `Ok(index)` values returned
-        // from the binary search. However, safepoints are inserted right before
-        // calls, and there are two things that can disturb the PC/offset
-        // associated with the safepoint versus the PC we actually use to query
-        // for the stack map:
-        //
-        // 1. The `backtrace` crate gives us the PC in a frame that will be
-        //    *returned to*, and where execution will continue from, rather than
-        //    the PC of the call we are currently at. So we would need to
-        //    disassemble one instruction backwards to query the actual PC for
-        //    the stack map.
-        //
-        //    TODO: One thing we *could* do to make this a little less error
-        //    prone, would be to assert/check that the nearest GC safepoint
-        //    found is within `max_encoded_size(any kind of call instruction)`
-        //    our queried PC for the target architecture.
-        //
-        // 2. Cranelift's stack maps only handle the stack, not
-        //    registers. However, some references that are arguments to a call
-        //    may need to be in registers. In these cases, what Cranelift will
-        //    do is:
-        //
-        //      a. spill all the live references,
-        //      b. insert a GC safepoint for those references,
-        //      c. reload the references into registers, and finally
-        //      d. make the call.
-        //
-        //    Step (c) adds drift between the GC safepoint and the location of
-        //    the call, which is where we actually walk the stack frame and
-        //    collect its live references.
-        //
-        //    Luckily, the spill stack slots for the live references are still
-        //    up to date, so we can still find all the on-stack roots.
-        //    Furthermore, we do not have a moving GC, so we don't need to worry
-        //    whether the following code will reuse the references in registers
-        //    (which would not have been updated to point to the moved objects)
-        //    or reload from the stack slots (which would have been updated to
-        //    point to the moved objects).
-        let index = match stack_maps
-            .pc_to_stack_map
-            .binary_search_by_key(&pc, |(pc, _stack_map)| *pc)
+    /// Set whether it is okay to GC or not right now.
+    ///
+    /// This is provided as a helper for enabling various debug-only assertions
+    /// and checking places where the `wasmtime-runtime` user expects there not
+    /// to be any GCs.
+    #[inline]
+    pub fn set_gc_okay(&mut self, okay: bool) -> bool {
+        #[cfg(debug_assertions)]
         {
-            // Exact hit.
-            Ok(i) => i,
-
-            Err(n) => {
-                // `Err(0)` means that the associated stack map would have been
-                // the first element in the array if this pc had an associated
-                // stack map, but this pc does not have an associated stack
-                // map. That doesn't make sense since every call and trap inside
-                // Wasm is a GC safepoint and should have a stack map, and the
-                // only way to have Wasm frames under this native frame is if we
-                // are at a call or a trap.
-                debug_assert!(n != 0);
-
-                n - 1
-            }
-        };
-
-        let stack_map = stack_maps.pc_to_stack_map[index].1.clone();
-        Some(stack_map)
+            return std::mem::replace(&mut self.gc_okay, okay);
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = okay;
+            return true;
+        }
     }
 }
 
-impl StackMapRegistryInner {
-    fn module_stack_maps(&self, pc: usize) -> Option<&ModuleStackMaps> {
-        let (end, stack_maps) = self.ranges.range(pc..).next()?;
-        if pc < stack_maps.range.start || *end < pc {
-            None
-        } else {
-            Some(stack_maps)
-        }
-    }
+/// Used by the runtime to lookup information about a module given a
+/// program counter value.
+pub trait ModuleInfoLookup {
+    /// Lookup the module information from a program counter value.
+    fn lookup(&self, pc: usize) -> Option<Arc<dyn ModuleInfo>>;
+}
+
+/// Used by the runtime to query module information.
+pub trait ModuleInfo {
+    /// Lookup the stack map at a program counter value.
+    fn lookup_stack_map(&self, pc: usize) -> Option<&StackMap>;
 }
 
 #[derive(Debug, Default)]
@@ -941,10 +853,13 @@ impl<T> std::ops::DerefMut for DebugOnly<T> {
 /// Additionally, you must have registered the stack maps for every Wasm module
 /// that has frames on the stack with the given `stack_maps_registry`.
 pub unsafe fn gc(
-    stack_maps_registry: &StackMapRegistry,
-    externref_activations_table: &VMExternRefActivationsTable,
+    module_info_lookup: &dyn ModuleInfoLookup,
+    externref_activations_table: &mut VMExternRefActivationsTable,
 ) {
     log::debug!("start GC");
+
+    #[cfg(debug_assertions)]
+    assert!(externref_activations_table.gc_okay);
 
     debug_assert!({
         // This set is only non-empty within this function. It is built up when
@@ -952,8 +867,7 @@ pub unsafe fn gc(
         // into the activations table's bump-allocated space at the
         // end. Therefore, it should always be empty upon entering this
         // function.
-        let precise_stack_roots = externref_activations_table.precise_stack_roots.borrow();
-        precise_stack_roots.is_empty()
+        externref_activations_table.precise_stack_roots.is_empty()
     });
 
     // Whenever we call into Wasm from host code for the first time, we set a
@@ -961,13 +875,12 @@ pub unsafe fn gc(
     // canary. If there is *not* a stack canary, then there must be zero Wasm
     // frames on the stack. Therefore, we can simply reset the table without
     // walking the stack.
-    let stack_canary = match externref_activations_table.stack_canary.get() {
+    let stack_canary = match externref_activations_table.stack_canary {
         None => {
             if cfg!(debug_assertions) {
                 // Assert that there aren't any Wasm frames on the stack.
                 backtrace::trace(|frame| {
-                    let stack_map = stack_maps_registry.lookup_stack_map(frame.ip() as usize);
-                    assert!(stack_map.is_none());
+                    assert!(module_info_lookup.lookup(frame.ip() as usize).is_none());
                     true
                 });
             }
@@ -975,7 +888,7 @@ pub unsafe fn gc(
             log::debug!("end GC");
             return;
         }
-        Some(canary) => canary.as_ptr() as usize,
+        Some(canary) => canary,
     };
 
     // There is a stack canary, so there must be Wasm frames on the stack. The
@@ -1011,25 +924,30 @@ pub unsafe fn gc(
         let pc = frame.ip() as usize;
         let sp = frame.sp() as usize;
 
-        if let Some(stack_map) = stack_maps_registry.lookup_stack_map(pc) {
-            debug_assert!(sp != 0, "we should always get a valid SP for Wasm frames");
+        if let Some(module_info) = module_info_lookup.lookup(pc) {
+            if let Some(stack_map) = module_info.lookup_stack_map(pc) {
+                debug_assert!(sp != 0, "we should always get a valid SP for Wasm frames");
 
-            for i in 0..(stack_map.mapped_words() as usize) {
-                if stack_map.get_bit(i) {
-                    // Stack maps have one bit per word in the frame, and the
-                    // zero^th bit is the *lowest* addressed word in the frame,
-                    // i.e. the closest to the SP. So to get the `i`^th word in
-                    // this frame, we add `i * sizeof(word)` to the SP.
-                    let ptr_to_ref = sp + i * mem::size_of::<usize>();
+                for i in 0..(stack_map.mapped_words() as usize) {
+                    if stack_map.get_bit(i) {
+                        // Stack maps have one bit per word in the frame, and the
+                        // zero^th bit is the *lowest* addressed word in the frame,
+                        // i.e. the closest to the SP. So to get the `i`^th word in
+                        // this frame, we add `i * sizeof(word)` to the SP.
+                        let ptr_to_ref = sp + i * mem::size_of::<usize>();
 
-                    let r = std::ptr::read(ptr_to_ref as *const *mut VMExternData);
-                    debug_assert!(
-                        r.is_null() || activations_table_set.contains(&r),
-                        "every on-stack externref inside a Wasm frame should \
-                         have an entry in the VMExternRefActivationsTable"
-                    );
-                    if let Some(r) = NonNull::new(r) {
-                        externref_activations_table.insert_precise_stack_root(r);
+                        let r = std::ptr::read(ptr_to_ref as *const *mut VMExternData);
+                        debug_assert!(
+                            r.is_null() || activations_table_set.contains(&r),
+                            "every on-stack externref inside a Wasm frame should \
+                            have an entry in the VMExternRefActivationsTable"
+                        );
+                        if let Some(r) = NonNull::new(r) {
+                            VMExternRefActivationsTable::insert_precise_stack_root(
+                                &mut externref_activations_table.precise_stack_roots,
+                                r,
+                            );
+                        }
                     }
                 }
             }
@@ -1059,8 +977,7 @@ pub unsafe fn gc(
         externref_activations_table.sweep();
     } else {
         log::warn!("did not find stack canary; skipping GC sweep");
-        let mut roots = externref_activations_table.precise_stack_roots.borrow_mut();
-        roots.clear();
+        externref_activations_table.precise_stack_roots.clear();
     }
 
     log::debug!("end GC");
@@ -1088,12 +1005,12 @@ mod tests {
     #[test]
     fn ref_count_is_at_correct_offset() {
         let s = "hi";
-        let s: &dyn Any = &s as _;
-        let s: *const dyn Any = s as _;
-        let s: *mut dyn Any = s as _;
+        let s: &(dyn Any + Send + Sync) = &s as _;
+        let s: *const (dyn Any + Send + Sync) = s as _;
+        let s: *mut (dyn Any + Send + Sync) = s as _;
 
         let extern_data = VMExternData {
-            ref_count: UnsafeCell::new(0),
+            ref_count: AtomicUsize::new(0),
             value_ptr: NonNull::new(s).unwrap(),
         };
 
@@ -1102,23 +1019,8 @@ mod tests {
 
         let actual_offset = (ref_count_ptr as usize) - (extern_data_ptr as usize);
 
-        assert_eq!(
-            wasmtime_environ::VMOffsets::vm_extern_data_ref_count(),
-            actual_offset.try_into().unwrap(),
-        );
-    }
-
-    #[test]
-    fn table_next_is_at_correct_offset() {
-        let table = VMExternRefActivationsTable::new();
-
-        let table_ptr = &table as *const _;
-        let next_ptr = &table.next as *const _;
-
-        let actual_offset = (next_ptr as usize) - (table_ptr as usize);
-
-        let offsets = wasmtime_environ::VMOffsets {
-            pointer_size: 8,
+        let offsets = wasmtime_environ::VMOffsets::from(wasmtime_environ::VMOffsetsFields {
+            ptr: 8,
             num_signature_ids: 0,
             num_imported_functions: 0,
             num_imported_tables: 0,
@@ -1128,7 +1030,34 @@ mod tests {
             num_defined_tables: 0,
             num_defined_memories: 0,
             num_defined_globals: 0,
-        };
+        });
+        assert_eq!(
+            offsets.vm_extern_data_ref_count(),
+            actual_offset.try_into().unwrap(),
+        );
+    }
+
+    #[test]
+    fn table_next_is_at_correct_offset() {
+        let table = VMExternRefActivationsTable::new();
+
+        let table_ptr = &table as *const _;
+        let next_ptr = &table.alloc.next as *const _;
+
+        let actual_offset = (next_ptr as usize) - (table_ptr as usize);
+
+        let offsets = wasmtime_environ::VMOffsets::from(wasmtime_environ::VMOffsetsFields {
+            ptr: 8,
+            num_signature_ids: 0,
+            num_imported_functions: 0,
+            num_imported_tables: 0,
+            num_imported_memories: 0,
+            num_imported_globals: 0,
+            num_defined_functions: 0,
+            num_defined_tables: 0,
+            num_defined_memories: 0,
+            num_defined_globals: 0,
+        });
         assert_eq!(
             offsets.vm_extern_ref_activation_table_next() as usize,
             actual_offset
@@ -1140,12 +1069,12 @@ mod tests {
         let table = VMExternRefActivationsTable::new();
 
         let table_ptr = &table as *const _;
-        let end_ptr = &table.end as *const _;
+        let end_ptr = &table.alloc.end as *const _;
 
         let actual_offset = (end_ptr as usize) - (table_ptr as usize);
 
-        let offsets = wasmtime_environ::VMOffsets {
-            pointer_size: 8,
+        let offsets = wasmtime_environ::VMOffsets::from(wasmtime_environ::VMOffsetsFields {
+            ptr: 8,
             num_signature_ids: 0,
             num_imported_functions: 0,
             num_imported_tables: 0,
@@ -1155,7 +1084,7 @@ mod tests {
             num_defined_tables: 0,
             num_defined_memories: 0,
             num_defined_globals: 0,
-        };
+        });
         assert_eq!(
             offsets.vm_extern_ref_activation_table_end() as usize,
             actual_offset

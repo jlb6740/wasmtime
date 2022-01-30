@@ -1,45 +1,61 @@
-use crate::error::GuestError;
-use crate::region::Region;
-use std::cell::RefCell;
+use crate::{BorrowHandle, GuestError, Region};
 use std::collections::HashMap;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct BorrowHandle(usize);
+use std::sync::Mutex;
 
 pub struct BorrowChecker {
-    bc: RefCell<InnerBorrowChecker>,
+    /// Unfortunately, since the terminology of std::cell and the problem domain of borrow checking
+    /// overlap, the method calls on this member will be confusing.
+    ///
+    /// Also, unfortunately, for now this uses a `Mutex`. The reason for that is
+    /// that this is shared as `&BorrowChecker` in a bunch of `GuestPtr` values.
+    /// Through this sharing we still want each `GuestPtr` to be `Send` and the
+    /// "naive" way to make `&T` `Send` with interior mutability is to use a
+    /// `Mutex`. Fixing this will likely require rethinking `GuestPtr` one way
+    /// or another. That needs to happen for other reasons as well (for example
+    /// to allow for wasm calls to happen while `GuestPtr` values are active),
+    /// so it's hoped that in a later rethinking of `GuestPtr` we can revisit
+    /// this and remove this `Mutex`.
+    bc: Mutex<InnerBorrowChecker>,
 }
 
 impl BorrowChecker {
-    /// A `BorrowChecker` manages run-time validation of borrows from a `GuestMemory`. It keeps
-    /// track of regions of guest memory which are possible to alias with Rust references (via the
-    /// `GuestSlice` and `GuestStr` structs, which implement `std::ops::Deref` and
-    /// `std::ops::DerefMut`. It also enforces that `GuestPtr::read` and `GuestPtr::write` do not
-    /// access memory with an outstanding borrow.
-    /// The safety of this mechanism depends on creating exactly one `BorrowChecker` per
-    /// WebAssembly memory. There must be no other reads or writes of WebAssembly the memory by
-    /// either Rust or WebAssembly code while there are any outstanding borrows, as given by
-    /// `BorrowChecker::has_outstanding_borrows()`.
-    pub unsafe fn new() -> Self {
+    /// A `BorrowChecker` manages run-time validation of borrows from a
+    /// `GuestMemory`. It keeps track of regions of guest memory which are
+    /// possible to alias with Rust references (via the `GuestSlice` and
+    /// `GuestStr` structs, which implement `std::ops::Deref` and
+    /// `std::ops::DerefMut`. It also enforces that `GuestPtr::read`
+    /// does not access memory with an outstanding mutable borrow, and
+    /// `GuestPtr::write` does not access memory with an outstanding
+    /// shared or mutable borrow.
+    pub fn new() -> Self {
         BorrowChecker {
-            bc: RefCell::new(InnerBorrowChecker::new()),
+            bc: Mutex::new(InnerBorrowChecker::new()),
         }
     }
-    /// Indicates whether any outstanding borrows are known to the `BorrowChecker`. This function
-    /// must be `false` in order for it to be safe to recursively call into a WebAssembly module,
-    /// or to manipulate the WebAssembly memory by any other means.
+    /// Indicates whether any outstanding shared or mutable borrows are known
+    /// to the `BorrowChecker`. This function must be `false` in order for it
+    /// to be safe to recursively call into a WebAssembly module, or to
+    /// manipulate the WebAssembly memory by any other means.
     pub fn has_outstanding_borrows(&self) -> bool {
-        self.bc.borrow().has_outstanding_borrows()
+        self.bc.lock().unwrap().has_outstanding_borrows()
     }
-
-    pub(crate) fn borrow(&self, r: Region) -> Result<BorrowHandle, GuestError> {
-        self.bc.borrow_mut().borrow(r)
+    pub fn shared_borrow(&self, r: Region) -> Result<BorrowHandle, GuestError> {
+        self.bc.lock().unwrap().shared_borrow(r)
     }
-    pub(crate) fn unborrow(&self, h: BorrowHandle) {
-        self.bc.borrow_mut().unborrow(h)
+    pub fn mut_borrow(&self, r: Region) -> Result<BorrowHandle, GuestError> {
+        self.bc.lock().unwrap().mut_borrow(r)
     }
-    pub(crate) fn is_borrowed(&self, r: Region) -> bool {
-        self.bc.borrow().is_borrowed(r)
+    pub fn shared_unborrow(&self, h: BorrowHandle) {
+        self.bc.lock().unwrap().shared_unborrow(h)
+    }
+    pub fn mut_unborrow(&self, h: BorrowHandle) {
+        self.bc.lock().unwrap().mut_unborrow(h)
+    }
+    pub fn is_shared_borrowed(&self, r: Region) -> bool {
+        self.bc.lock().unwrap().is_shared_borrowed(r)
+    }
+    pub fn is_mut_borrowed(&self, r: Region) -> bool {
+        self.bc.lock().unwrap().is_mut_borrowed(r)
     }
 }
 
@@ -47,11 +63,12 @@ impl BorrowChecker {
 /// This is a pretty naive way to account for borrows. This datastructure
 /// could be made a lot more efficient with some effort.
 struct InnerBorrowChecker {
-    /// Map from handle to region borrowed. A HashMap is probably not ideal
+    /// Maps from handle to region borrowed. A HashMap is probably not ideal
     /// for this but it works. It would be more efficient if we could
     /// check `is_borrowed` without an O(n) iteration, by organizing borrows
     /// by an ordering of Region.
-    borrows: HashMap<BorrowHandle, Region>,
+    shared_borrows: HashMap<BorrowHandle, Region>,
+    mut_borrows: HashMap<BorrowHandle, Region>,
     /// Handle to give out for the next borrow. This is the bare minimum of
     /// bookkeeping of free handles, and in a pathological case we could run
     /// out, hence [`GuestError::BorrowCheckerOutOfHandles`]
@@ -61,22 +78,26 @@ struct InnerBorrowChecker {
 impl InnerBorrowChecker {
     fn new() -> Self {
         InnerBorrowChecker {
-            borrows: HashMap::new(),
+            shared_borrows: HashMap::new(),
+            mut_borrows: HashMap::new(),
             next_handle: BorrowHandle(0),
         }
     }
 
     fn has_outstanding_borrows(&self) -> bool {
-        !self.borrows.is_empty()
+        !(self.shared_borrows.is_empty() && self.mut_borrows.is_empty())
     }
 
-    fn is_borrowed(&self, r: Region) -> bool {
-        !self.borrows.values().all(|b| !b.overlaps(r))
+    fn is_shared_borrowed(&self, r: Region) -> bool {
+        self.shared_borrows.values().any(|b| b.overlaps(r))
+    }
+    fn is_mut_borrowed(&self, r: Region) -> bool {
+        self.mut_borrows.values().any(|b| b.overlaps(r))
     }
 
     fn new_handle(&mut self) -> Result<BorrowHandle, GuestError> {
         // Reset handles to 0 if all handles have been returned.
-        if self.borrows.is_empty() {
+        if self.shared_borrows.is_empty() && self.mut_borrows.is_empty() {
             self.next_handle = BorrowHandle(0);
         }
         let h = self.next_handle;
@@ -92,17 +113,32 @@ impl InnerBorrowChecker {
         Ok(h)
     }
 
-    fn borrow(&mut self, r: Region) -> Result<BorrowHandle, GuestError> {
-        if self.is_borrowed(r) {
+    fn shared_borrow(&mut self, r: Region) -> Result<BorrowHandle, GuestError> {
+        if self.is_mut_borrowed(r) {
             return Err(GuestError::PtrBorrowed(r));
         }
         let h = self.new_handle()?;
-        self.borrows.insert(h, r);
+        self.shared_borrows.insert(h, r);
         Ok(h)
     }
 
-    fn unborrow(&mut self, h: BorrowHandle) {
-        let _ = self.borrows.remove(&h);
+    fn mut_borrow(&mut self, r: Region) -> Result<BorrowHandle, GuestError> {
+        if self.is_shared_borrowed(r) || self.is_mut_borrowed(r) {
+            return Err(GuestError::PtrBorrowed(r));
+        }
+        let h = self.new_handle()?;
+        self.mut_borrows.insert(h, r);
+        Ok(h)
+    }
+
+    fn shared_unborrow(&mut self, h: BorrowHandle) {
+        let removed = self.shared_borrows.remove(&h);
+        debug_assert!(removed.is_some(), "double-freed shared borrow");
+    }
+
+    fn mut_unborrow(&mut self, h: BorrowHandle) {
+        let removed = self.mut_borrows.remove(&h);
+        debug_assert!(removed.is_some(), "double-freed mut borrow");
     }
 }
 
@@ -115,15 +151,15 @@ mod test {
         let r1 = Region::new(0, 10);
         let r2 = Region::new(10, 10);
         assert!(!r1.overlaps(r2));
-        bs.borrow(r1).expect("can borrow r1");
-        bs.borrow(r2).expect("can borrow r2");
+        bs.mut_borrow(r1).expect("can borrow r1");
+        bs.mut_borrow(r2).expect("can borrow r2");
 
         let mut bs = InnerBorrowChecker::new();
         let r1 = Region::new(10, 10);
         let r2 = Region::new(0, 10);
         assert!(!r1.overlaps(r2));
-        bs.borrow(r1).expect("can borrow r1");
-        bs.borrow(r2).expect("can borrow r2");
+        bs.mut_borrow(r1).expect("can borrow r1");
+        bs.mut_borrow(r2).expect("can borrow r2");
     }
 
     #[test]
@@ -132,29 +168,33 @@ mod test {
         let r1 = Region::new(0, 10);
         let r2 = Region::new(9, 10);
         assert!(r1.overlaps(r2));
-        bs.borrow(r1).expect("can borrow r1");
-        assert!(bs.borrow(r2).is_err(), "cant borrow r2");
+        bs.shared_borrow(r1).expect("can borrow r1");
+        assert!(bs.mut_borrow(r2).is_err(), "cant mut borrow r2");
+        bs.shared_borrow(r2).expect("can shared borrow r2");
 
         let mut bs = InnerBorrowChecker::new();
         let r1 = Region::new(0, 10);
         let r2 = Region::new(2, 5);
         assert!(r1.overlaps(r2));
-        bs.borrow(r1).expect("can borrow r1");
-        assert!(bs.borrow(r2).is_err(), "cant borrow r2");
+        bs.shared_borrow(r1).expect("can borrow r1");
+        assert!(bs.mut_borrow(r2).is_err(), "cant borrow r2");
+        bs.shared_borrow(r2).expect("can shared borrow r2");
 
         let mut bs = InnerBorrowChecker::new();
         let r1 = Region::new(9, 10);
         let r2 = Region::new(0, 10);
         assert!(r1.overlaps(r2));
-        bs.borrow(r1).expect("can borrow r1");
-        assert!(bs.borrow(r2).is_err(), "cant borrow r2");
+        bs.shared_borrow(r1).expect("can borrow r1");
+        assert!(bs.mut_borrow(r2).is_err(), "cant borrow r2");
+        bs.shared_borrow(r2).expect("can shared borrow r2");
 
         let mut bs = InnerBorrowChecker::new();
         let r1 = Region::new(2, 5);
         let r2 = Region::new(0, 10);
         assert!(r1.overlaps(r2));
-        bs.borrow(r1).expect("can borrow r1");
-        assert!(bs.borrow(r2).is_err(), "cant borrow r2");
+        bs.shared_borrow(r1).expect("can borrow r1");
+        assert!(bs.mut_borrow(r2).is_err(), "cant borrow r2");
+        bs.shared_borrow(r2).expect("can shared borrow r2");
 
         let mut bs = InnerBorrowChecker::new();
         let r1 = Region::new(2, 5);
@@ -162,10 +202,11 @@ mod test {
         let r3 = Region::new(15, 5);
         let r4 = Region::new(0, 10);
         assert!(r1.overlaps(r4));
-        bs.borrow(r1).expect("can borrow r1");
-        bs.borrow(r2).expect("can borrow r2");
-        bs.borrow(r3).expect("can borrow r3");
-        assert!(bs.borrow(r4).is_err(), "cant borrow r4");
+        bs.shared_borrow(r1).expect("can borrow r1");
+        bs.shared_borrow(r2).expect("can borrow r2");
+        bs.shared_borrow(r3).expect("can borrow r3");
+        assert!(bs.mut_borrow(r4).is_err(), "cant mut borrow r4");
+        bs.shared_borrow(r4).expect("can shared borrow r4");
     }
 
     #[test]
@@ -175,22 +216,44 @@ mod test {
         let r2 = Region::new(10, 10);
         assert!(!r1.overlaps(r2));
         assert_eq!(bs.has_outstanding_borrows(), false, "start with no borrows");
-        let h1 = bs.borrow(r1).expect("can borrow r1");
+        let h1 = bs.mut_borrow(r1).expect("can borrow r1");
         assert_eq!(bs.has_outstanding_borrows(), true, "h1 is outstanding");
-        let h2 = bs.borrow(r2).expect("can borrow r2");
+        let h2 = bs.mut_borrow(r2).expect("can borrow r2");
 
-        assert!(bs.borrow(r2).is_err(), "can't borrow r2 twice");
-        bs.unborrow(h2);
+        assert!(bs.mut_borrow(r2).is_err(), "can't borrow r2 twice");
+        bs.mut_unborrow(h2);
         assert_eq!(
             bs.has_outstanding_borrows(),
             true,
             "h1 is still outstanding"
         );
-        bs.unborrow(h1);
+        bs.mut_unborrow(h1);
         assert_eq!(bs.has_outstanding_borrows(), false, "no remaining borrows");
 
         let _h3 = bs
-            .borrow(r2)
+            .mut_borrow(r2)
             .expect("can borrow r2 again now that its been unborrowed");
+
+        // Lets try again with shared:
+
+        let mut bs = InnerBorrowChecker::new();
+        let r1 = Region::new(0, 10);
+        let r2 = Region::new(10, 10);
+        assert!(!r1.overlaps(r2));
+        assert_eq!(bs.has_outstanding_borrows(), false, "start with no borrows");
+        let h1 = bs.shared_borrow(r1).expect("can borrow r1");
+        assert_eq!(bs.has_outstanding_borrows(), true, "h1 is outstanding");
+        let h2 = bs.shared_borrow(r2).expect("can borrow r2");
+        let h3 = bs.shared_borrow(r2).expect("can shared borrow r2 twice");
+
+        bs.shared_unborrow(h2);
+        assert_eq!(
+            bs.has_outstanding_borrows(),
+            true,
+            "h1, h3 still outstanding"
+        );
+        bs.shared_unborrow(h1);
+        bs.shared_unborrow(h3);
+        assert_eq!(bs.has_outstanding_borrows(), false, "no remaining borrows");
     }
 }

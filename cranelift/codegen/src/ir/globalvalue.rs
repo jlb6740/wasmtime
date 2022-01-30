@@ -6,8 +6,12 @@ use crate::isa::TargetIsa;
 use crate::machinst::RelocDistance;
 use core::fmt;
 
+#[cfg(feature = "enable-serde")]
+use serde::{Deserialize, Serialize};
+
 /// Information about a global value declaration.
 #[derive(Clone)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub enum GlobalValueData {
     /// Value is the address of the VM context struct.
     VMContext,
@@ -66,7 +70,7 @@ pub enum GlobalValueData {
         ///
         /// If `true`, some backends may use relocation forms that have limited range: for example,
         /// a +/- 2^27-byte range on AArch64. See the documentation for
-        /// [`RelocDistance`](machinst::RelocDistance) for more details.
+        /// [`RelocDistance`](crate::machinst::RelocDistance) for more details.
         colocated: bool,
 
         /// Does this symbol refer to a thread local storage value?

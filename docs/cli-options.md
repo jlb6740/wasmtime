@@ -71,12 +71,28 @@ $ wasmtime config new
 
 And that'll print out the path to the file you can edit.
 
-## `wasm2obj`
+## `compile`
 
-This is an experimental subcommand to compile a WebAssembly module to native
-code. Work for this is still heavily under development, but you can execute this
-with:
+This subcommand is used to Ahead-Of-Time (AOT) compile a WebAssembly module to produce
+a "compiled wasm" (.cwasm) file.
+
+The `wasmtime run` subcommand can then be used to run a AOT-compiled WebAssembly module:
 
 ```sh
-$ wasmtime wasm2obj foo.wasm foo.o
+$ wasmtime compile foo.wasm
+$ wasmtime foo.cwasm
+```
+
+AOT-compiled modules can be run from hosts that are compatible with the target
+environment of the AOT-completed module.
+
+## `settings`
+
+This subcommand is used to print the available Cranelift settings for a given target.
+
+When run without options, it will print the settings for the host target and also
+display what Cranelift settings are inferred for the host:
+
+```sh
+$ wasmtime settings
 ```

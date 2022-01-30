@@ -3,15 +3,14 @@ use wiggle::{GuestMemory, GuestPtr};
 use wiggle_test::{impl_errno, HostMemory, MemArea, WasiCtx};
 
 wiggle::from_witx!({
-    witx: ["tests/pointers.witx"],
-    ctx: WasiCtx,
+    witx: ["$CARGO_MANIFEST_DIR/tests/pointers.witx"],
 });
 
-impl_errno!(types::Errno, types::GuestErrorConversion);
+impl_errno!(types::Errno);
 
 impl<'a> pointers::Pointers for WasiCtx<'a> {
     fn pointers_and_enums<'b>(
-        &self,
+        &mut self,
         input1: types::Excuse,
         input2_ptr: &GuestPtr<'b, types::Excuse>,
         input3_ptr: &GuestPtr<'b, types::Excuse>,
@@ -126,7 +125,7 @@ impl PointersAndEnumsExercise {
             .boxed()
     }
     pub fn test(&self) {
-        let ctx = WasiCtx::new();
+        let mut ctx = WasiCtx::new();
         let host_memory = HostMemory::new();
 
         host_memory
@@ -150,14 +149,14 @@ impl PointersAndEnumsExercise {
             .expect("input4 ptr ref_mut");
 
         let e = pointers::pointers_and_enums(
-            &ctx,
+            &mut ctx,
             &host_memory,
-            self.input1.into(),
+            self.input1 as i32,
             self.input2_loc.ptr as i32,
             self.input3_loc.ptr as i32,
             self.input4_ptr_loc.ptr as i32,
         );
-        assert_eq!(e, types::Errno::Ok.into(), "errno");
+        assert_eq!(e, Ok(types::Errno::Ok as i32), "errno");
 
         // Implementation of pointers_and_enums writes input3 to the input2_loc:
         let written_to_input2_loc: i32 = host_memory
@@ -166,8 +165,7 @@ impl PointersAndEnumsExercise {
             .expect("input2 ref");
 
         assert_eq!(
-            written_to_input2_loc,
-            self.input3.into(),
+            written_to_input2_loc, self.input3 as i32,
             "pointers_and_enums written to input2"
         );
 

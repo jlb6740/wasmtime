@@ -1,6 +1,8 @@
 //! Representation of Cranelift IR functions.
 
+mod atomic_rmw_op;
 mod builder;
+pub mod condcodes;
 pub mod constant;
 pub mod dfg;
 pub mod entities;
@@ -21,15 +23,15 @@ pub mod stackslot;
 mod table;
 mod trapcode;
 pub mod types;
-mod valueloc;
 
 #[cfg(feature = "enable-serde")]
 use serde::{Deserialize, Serialize};
 
+pub use crate::ir::atomic_rmw_op::AtomicRmwOp;
 pub use crate::ir::builder::{
     InsertBuilder, InstBuilder, InstBuilderBase, InstInserterBase, ReplaceBuilder,
 };
-pub use crate::ir::constant::{ConstantData, ConstantOffset, ConstantPool};
+pub use crate::ir::constant::{ConstantData, ConstantPool};
 pub use crate::ir::dfg::{DataFlowGraph, ValueDef};
 pub use crate::ir::entities::{
     Block, Constant, FuncRef, GlobalValue, Heap, Immediate, Inst, JumpTable, SigRef, StackSlot,
@@ -48,34 +50,19 @@ pub use crate::ir::instructions::{
 pub use crate::ir::jumptable::JumpTableData;
 pub use crate::ir::layout::Layout;
 pub use crate::ir::libcall::{get_probestack_funcref, LibCall};
-pub use crate::ir::memflags::MemFlags;
+pub use crate::ir::memflags::{Endianness, MemFlags};
 pub use crate::ir::progpoint::{ExpandedProgramPoint, ProgramOrder, ProgramPoint};
 pub use crate::ir::sourceloc::SourceLoc;
-pub use crate::ir::stackslot::{StackLayoutInfo, StackSlotData, StackSlotKind, StackSlots};
+pub use crate::ir::stackslot::{StackSlotData, StackSlotKind, StackSlots};
 pub use crate::ir::table::TableData;
 pub use crate::ir::trapcode::TrapCode;
 pub use crate::ir::types::Type;
-pub use crate::ir::valueloc::{ArgumentLoc, ValueLoc};
-pub use cranelift_codegen_shared::condcodes;
+pub use crate::value_label::LabelValueLoc;
 
-use crate::binemit;
 use crate::entity::{entity_impl, PrimaryMap, SecondaryMap};
-use crate::isa;
-
-/// Map of value locations.
-pub type ValueLocations = SecondaryMap<Value, ValueLoc>;
 
 /// Map of jump tables.
 pub type JumpTables = PrimaryMap<JumpTable, JumpTableData>;
-
-/// Map of instruction encodings.
-pub type InstEncodings = SecondaryMap<Inst, isa::Encoding>;
-
-/// Code offsets for blocks.
-pub type BlockOffsets = SecondaryMap<Block, binemit::CodeOffset>;
-
-/// Code offsets for Jump Tables.
-pub type JumpTableOffsets = SecondaryMap<JumpTable, binemit::CodeOffset>;
 
 /// Source locations for instructions.
 pub type SourceLocs = SecondaryMap<Inst, SourceLoc>;
@@ -88,6 +75,7 @@ entity_impl!(ValueLabel, "val");
 
 /// A label of a Value.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct ValueLabelStart {
     /// Source location when it is in effect
     pub from: SourceLoc,
@@ -98,6 +86,7 @@ pub struct ValueLabelStart {
 
 /// Value label assignements: label starts or value aliases.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub enum ValueLabelAssignments {
     /// Original value labels assigned at transform.
     Starts(alloc::vec::Vec<ValueLabelStart>),

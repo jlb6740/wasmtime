@@ -46,34 +46,25 @@ define_passes! {
     wasm_translate_function: "Translate WASM function",
 
     verifier: "Verify Cranelift IR",
-    verify_cssa: "Verify CSSA",
-    verify_liveness: "Verify live ranges",
-    verify_locations: "Verify value locations",
     verify_flags: "Verify CPU flags",
 
     compile: "Compilation passes",
     flowgraph: "Control flow graph",
     domtree: "Dominator tree",
     loop_analysis: "Loop analysis",
-    postopt: "Post-legalization rewriting",
     preopt: "Pre-legalization rewriting",
     dce: "Dead code elimination",
-    legalize: "Legalization",
     gvn: "Global value numbering",
     licm: "Loop invariant code motion",
     unreachable_code: "Remove unreachable blocks",
     remove_constant_phis: "Remove constant phi-nodes",
 
-    regalloc: "Register allocation",
-    ra_liveness: "RA liveness analysis",
-    ra_cssa: "RA coalescing CSSA",
-    ra_spilling: "RA spilling",
-    ra_reload: "RA reloading",
-    ra_coloring: "RA coloring",
+    vcode_lower: "VCode lowering",
+    vcode_post_ra: "VCode post-register allocation finalization",
+    vcode_emit: "VCode emission",
+    vcode_emit_finish: "VCode emission finalization",
 
-    prologue_epilogue: "Prologue/epilogue insertion",
-    shrink_instructions: "Instruction encoding shrinking",
-    relax_branches: "Branch relaxation",
+    regalloc: "Register allocation",
     binemit: "Binary machine code emission",
     layout_renumber: "Layout full renumbering",
 
@@ -103,7 +94,6 @@ impl fmt::Display for Pass {
 #[cfg(feature = "std")]
 mod details {
     use super::{Pass, DESCRIPTIONS, NUM_PASSES};
-    use log::debug;
     use std::cell::{Cell, RefCell};
     use std::fmt;
     use std::mem;
@@ -138,6 +128,13 @@ mod details {
     /// Accumulated timing for all passes.
     pub struct PassTimes {
         pass: [PassTime; NUM_PASSES],
+    }
+
+    impl PassTimes {
+        /// Returns the total amount of time taken by all the passes measured.
+        pub fn total(&self) -> Duration {
+            self.pass.iter().map(|p| p.total - p.child).sum()
+        }
     }
 
     impl Default for PassTimes {
@@ -188,7 +185,7 @@ mod details {
     /// This function is called by the publicly exposed pass functions.
     pub(super) fn start_pass(pass: Pass) -> TimingToken {
         let prev = CURRENT_PASS.with(|p| p.replace(pass));
-        debug!("timing: Starting {}, (during {})", pass, prev);
+        log::debug!("timing: Starting {}, (during {})", pass, prev);
         TimingToken {
             start: Instant::now(),
             pass,
@@ -200,7 +197,7 @@ mod details {
     impl Drop for TimingToken {
         fn drop(&mut self) {
             let duration = self.start.elapsed();
-            debug!("timing: Ending {}", self.pass);
+            log::debug!("timing: Ending {}", self.pass);
             let old_cur = CURRENT_PASS.with(|p| p.replace(self.prev));
             debug_assert_eq!(self.pass, old_cur, "Timing tokens dropped out of order");
             PASS_TIME.with(|rc| {

@@ -1,6 +1,9 @@
-use crate::host_ref::HostRef;
-use crate::{wasm_extern_t, wasm_memorytype_t, wasm_store_t, ExternHost};
-use wasmtime::Memory;
+use crate::{
+    handle_result, wasm_extern_t, wasm_memorytype_t, wasm_store_t, wasmtime_error_t, CStoreContext,
+    CStoreContextMut,
+};
+use std::convert::TryFrom;
+use wasmtime::{Extern, Memory};
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -15,63 +18,112 @@ pub type wasm_memory_pages_t = u32;
 impl wasm_memory_t {
     pub(crate) fn try_from(e: &wasm_extern_t) -> Option<&wasm_memory_t> {
         match &e.which {
-            ExternHost::Memory(_) => Some(unsafe { &*(e as *const _ as *const _) }),
+            Extern::Memory(_) => Some(unsafe { &*(e as *const _ as *const _) }),
             _ => None,
         }
     }
 
-    fn memory(&self) -> &HostRef<Memory> {
-        match &self.ext.which {
-            ExternHost::Memory(m) => m,
+    fn memory(&self) -> Memory {
+        match self.ext.which {
+            Extern::Memory(m) => m,
             _ => unsafe { std::hint::unreachable_unchecked() },
         }
     }
-
-    fn externref(&self) -> wasmtime::ExternRef {
-        self.memory().clone().into()
-    }
 }
 
 #[no_mangle]
-pub extern "C" fn wasm_memory_new(
-    store: &wasm_store_t,
+pub unsafe extern "C" fn wasm_memory_new(
+    store: &mut wasm_store_t,
     mt: &wasm_memorytype_t,
-) -> Box<wasm_memory_t> {
-    let memory = HostRef::new(&store.store, Memory::new(&store.store, mt.ty().ty.clone()));
-    Box::new(wasm_memory_t {
+) -> Option<Box<wasm_memory_t>> {
+    let memory = Memory::new(store.store.context_mut(), mt.ty().ty.clone()).ok()?;
+    Some(Box::new(wasm_memory_t {
         ext: wasm_extern_t {
-            which: ExternHost::Memory(memory),
+            store: store.store.clone(),
+            which: memory.into(),
         },
-    })
+    }))
 }
 
 #[no_mangle]
-pub extern "C" fn wasm_memory_as_extern(m: &wasm_memory_t) -> &wasm_extern_t {
+pub extern "C" fn wasm_memory_as_extern(m: &mut wasm_memory_t) -> &mut wasm_extern_t {
+    &mut m.ext
+}
+
+#[no_mangle]
+pub extern "C" fn wasm_memory_as_extern_const(m: &wasm_memory_t) -> &wasm_extern_t {
     &m.ext
 }
 
 #[no_mangle]
-pub extern "C" fn wasm_memory_type(m: &wasm_memory_t) -> Box<wasm_memorytype_t> {
-    let ty = m.memory().borrow().ty();
+pub unsafe extern "C" fn wasm_memory_type(m: &wasm_memory_t) -> Box<wasm_memorytype_t> {
+    let ty = m.memory().ty(m.ext.store.context());
     Box::new(wasm_memorytype_t::new(ty))
 }
 
 #[no_mangle]
-pub extern "C" fn wasm_memory_data(m: &wasm_memory_t) -> *mut u8 {
-    m.memory().borrow().data_ptr()
+pub unsafe extern "C" fn wasm_memory_data(m: &wasm_memory_t) -> *mut u8 {
+    m.memory().data_ptr(m.ext.store.context())
 }
 
 #[no_mangle]
-pub extern "C" fn wasm_memory_data_size(m: &wasm_memory_t) -> usize {
-    m.memory().borrow().data_size()
+pub unsafe extern "C" fn wasm_memory_data_size(m: &wasm_memory_t) -> usize {
+    m.memory().data_size(m.ext.store.context())
 }
 
 #[no_mangle]
-pub extern "C" fn wasm_memory_size(m: &wasm_memory_t) -> wasm_memory_pages_t {
-    m.memory().borrow().size()
+pub unsafe extern "C" fn wasm_memory_size(m: &wasm_memory_t) -> wasm_memory_pages_t {
+    u32::try_from(m.memory().size(m.ext.store.context())).unwrap()
 }
 
 #[no_mangle]
-pub extern "C" fn wasm_memory_grow(m: &wasm_memory_t, delta: wasm_memory_pages_t) -> bool {
-    m.memory().borrow().grow(delta).is_ok()
+pub unsafe extern "C" fn wasm_memory_grow(
+    m: &mut wasm_memory_t,
+    delta: wasm_memory_pages_t,
+) -> bool {
+    let memory = m.memory();
+    let mut store = m.ext.store.context_mut();
+    memory.grow(&mut store, u64::from(delta)).is_ok()
+}
+
+#[no_mangle]
+pub extern "C" fn wasmtime_memory_new(
+    store: CStoreContextMut<'_>,
+    ty: &wasm_memorytype_t,
+    ret: &mut Memory,
+) -> Option<Box<wasmtime_error_t>> {
+    handle_result(Memory::new(store, ty.ty().ty.clone()), |mem| *ret = mem)
+}
+
+#[no_mangle]
+pub extern "C" fn wasmtime_memory_type(
+    store: CStoreContext<'_>,
+    mem: &Memory,
+) -> Box<wasm_memorytype_t> {
+    Box::new(wasm_memorytype_t::new(mem.ty(store)))
+}
+
+#[no_mangle]
+pub extern "C" fn wasmtime_memory_data(store: CStoreContext<'_>, mem: &Memory) -> *const u8 {
+    mem.data(store).as_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn wasmtime_memory_data_size(store: CStoreContext<'_>, mem: &Memory) -> usize {
+    mem.data(store).len()
+}
+
+#[no_mangle]
+pub extern "C" fn wasmtime_memory_size(store: CStoreContext<'_>, mem: &Memory) -> u64 {
+    mem.size(store)
+}
+
+#[no_mangle]
+pub extern "C" fn wasmtime_memory_grow(
+    store: CStoreContextMut<'_>,
+    mem: &Memory,
+    delta: u64,
+    prev_size: &mut u64,
+) -> Option<Box<wasmtime_error_t>> {
+    handle_result(mem.grow(store, delta), |prev| *prev_size = prev)
 }

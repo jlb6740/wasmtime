@@ -45,11 +45,11 @@ pub trait GuestType<'a>: Sized {
 }
 
 /// A trait for `GuestType`s that have the same representation in guest memory
-/// as in Rust. These types can be used with the `GuestPtr::as_raw` method to
+/// as in Rust. These types can be used with the `GuestPtr::as_slice` method to
 /// view as a slice.
 ///
 /// Unsafe trait because a correct GuestTypeTransparent implemengation ensures that the
-/// GuestPtr::as_raw methods are safe. This trait should only ever be implemented
+/// GuestPtr::as_slice methods are safe. This trait should only ever be implemented
 /// by wiggle_generate-produced code.
 pub unsafe trait GuestTypeTransparent<'a>: GuestType<'a> {
     /// Checks that the memory at `ptr` is a valid representation of `Self`.
@@ -85,10 +85,10 @@ macro_rules! primitives {
                     start: offset,
                     len: size,
                 };
-                if ptr.borrow_checker().is_borrowed(region) {
+                if ptr.mem().is_mut_borrowed(region) {
                     return Err(GuestError::PtrBorrowed(region));
                 }
-                Ok(unsafe { *host_ptr.cast::<Self>() })
+                Ok(unsafe { <$i>::from_le_bytes(*host_ptr.cast::<[u8; mem::size_of::<Self>()]>()) })
             }
 
             #[inline]
@@ -104,11 +104,11 @@ macro_rules! primitives {
                     start: offset,
                     len: size,
                 };
-                if ptr.borrow_checker().is_borrowed(region) {
+                if ptr.mem().is_shared_borrowed(region) || ptr.mem().is_mut_borrowed(region) {
                     return Err(GuestError::PtrBorrowed(region));
                 }
                 unsafe {
-                    *host_ptr.cast::<Self>() = val;
+                    *host_ptr.cast::<[u8; mem::size_of::<Self>()]>() = <$i>::to_le_bytes(val);
                 }
                 Ok(())
             }
@@ -151,5 +151,32 @@ impl<'a, T> GuestType<'a> for GuestPtr<'a, T> {
 
     fn write(ptr: &GuestPtr<'_, Self>, val: Self) -> Result<(), GuestError> {
         ptr.cast::<u32>().write(val.offset())
+    }
+}
+
+// Support pointers-to-arrays where pointers are always 32-bits in wasm land
+impl<'a, T> GuestType<'a> for GuestPtr<'a, [T]>
+where
+    T: GuestType<'a>,
+{
+    fn guest_size() -> u32 {
+        u32::guest_size() * 2
+    }
+
+    fn guest_align() -> usize {
+        u32::guest_align()
+    }
+
+    fn read(ptr: &GuestPtr<'a, Self>) -> Result<Self, GuestError> {
+        let offset = ptr.cast::<u32>().read()?;
+        let len = ptr.cast::<u32>().add(1)?.read()?;
+        Ok(GuestPtr::new(ptr.mem(), offset).as_array(len))
+    }
+
+    fn write(ptr: &GuestPtr<'_, Self>, val: Self) -> Result<(), GuestError> {
+        let (offs, len) = val.offset();
+        let len_ptr = ptr.cast::<u32>().add(1)?;
+        ptr.cast::<u32>().write(offs)?;
+        len_ptr.write(len)
     }
 }

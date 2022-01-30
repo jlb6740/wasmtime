@@ -3,7 +3,7 @@
 //! The `unwind` test command runs each function through the full code generator pipeline.
 #![cfg_attr(feature = "cargo-clippy", allow(clippy::cast_ptr_alignment))]
 
-use crate::subtest::{run_filecheck, Context, SubTest, SubtestResult};
+use crate::subtest::{run_filecheck, Context, SubTest};
 use cranelift_codegen::{self, ir, isa::unwind::UnwindInfo};
 use cranelift_reader::TestCommand;
 use gimli::{
@@ -14,13 +14,12 @@ use std::borrow::Cow;
 
 struct TestUnwind;
 
-pub fn subtest(parsed: &TestCommand) -> SubtestResult<Box<dyn SubTest>> {
+pub fn subtest(parsed: &TestCommand) -> anyhow::Result<Box<dyn SubTest>> {
     assert_eq!(parsed.command, "unwind");
     if !parsed.options.is_empty() {
-        Err(format!("No options allowed on {}", parsed))
-    } else {
-        Ok(Box::new(TestUnwind))
+        anyhow::bail!("No options allowed on {}", parsed);
     }
+    Ok(Box::new(TestUnwind))
 }
 
 impl SubTest for TestUnwind {
@@ -36,7 +35,7 @@ impl SubTest for TestUnwind {
         true
     }
 
-    fn run(&self, func: Cow<ir::Function>, context: &Context) -> SubtestResult<()> {
+    fn run(&self, func: Cow<ir::Function>, context: &Context) -> anyhow::Result<()> {
         let isa = context.isa.expect("unwind needs an ISA");
         let mut comp_ctx = cranelift_codegen::Context::for_function(func.into_owned());
 
@@ -62,6 +61,9 @@ impl SubTest for TestUnwind {
                 table.write_eh_frame(&mut eh_frame).unwrap();
                 systemv::dump(&mut text, &eh_frame.0.into_vec(), isa.pointer_bytes())
             }
+            Some(ui) => {
+                anyhow::bail!("Unexpected unwind info type: {:?}", ui);
+            }
             None => {}
         }
 
@@ -70,7 +72,6 @@ impl SubTest for TestUnwind {
 }
 
 mod windowsx64 {
-    use byteorder::{ByteOrder, LittleEndian};
     use std::fmt::Write;
 
     pub fn dump<W: Write>(text: &mut W, mem: &[u8]) {
@@ -110,6 +111,7 @@ mod windowsx64 {
         version: u8,
         flags: u8,
         prologue_size: u8,
+        #[allow(dead_code)]
         unwind_code_count_raw: u8,
         frame_register: u8,
         frame_register_offset: u8,
@@ -163,23 +165,24 @@ mod windowsx64 {
             let op_and_info = mem[1];
             let op = UnwindOperation::from(op_and_info & 0xF);
             let info = (op_and_info & 0xF0) >> 4;
+            let unwind_le_bytes = |bytes| match (bytes, &mem[2..]) {
+                (2, &[b0, b1, ..]) => UnwindValue::U16(u16::from_le_bytes([b0, b1])),
+                (4, &[b0, b1, b2, b3, ..]) => {
+                    UnwindValue::U32(u32::from_le_bytes([b0, b1, b2, b3]))
+                }
+                (_, _) => panic!("not enough bytes to unwind value"),
+            };
 
-            let value = match op {
-                UnwindOperation::LargeStackAlloc => match info {
-                    0 => UnwindValue::U16(LittleEndian::read_u16(&mem[2..])),
-                    1 => UnwindValue::U32(LittleEndian::read_u32(&mem[2..])),
-                    _ => panic!("unexpected stack alloc info value"),
-                },
-                UnwindOperation::SaveNonvolatileRegister => {
-                    UnwindValue::U16(LittleEndian::read_u16(&mem[2..]))
+            let value = match (&op, info) {
+                (UnwindOperation::LargeStackAlloc, 0) => unwind_le_bytes(2),
+                (UnwindOperation::LargeStackAlloc, 1) => unwind_le_bytes(4),
+                (UnwindOperation::LargeStackAlloc, _) => {
+                    panic!("unexpected stack alloc info value")
                 }
-                UnwindOperation::SaveNonvolatileRegisterFar => {
-                    UnwindValue::U32(LittleEndian::read_u32(&mem[2..]))
-                }
-                UnwindOperation::SaveXmm128 => UnwindValue::U16(LittleEndian::read_u16(&mem[2..])),
-                UnwindOperation::SaveXmm128Far => {
-                    UnwindValue::U32(LittleEndian::read_u32(&mem[2..]))
-                }
+                (UnwindOperation::SaveNonvolatileRegister, _) => unwind_le_bytes(2),
+                (UnwindOperation::SaveNonvolatileRegisterFar, _) => unwind_le_bytes(4),
+                (UnwindOperation::SaveXmm128, _) => unwind_le_bytes(2),
+                (UnwindOperation::SaveXmm128Far, _) => unwind_le_bytes(4),
                 _ => UnwindValue::None,
             };
 

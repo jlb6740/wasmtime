@@ -1,67 +1,89 @@
-//! ARM 32-bit Instruction Set Architecture.
+//! 32-bit ARM Instruction Set Architecture.
 
-mod abi;
-mod binemit;
-mod enc_tables;
-mod registers;
-pub mod settings;
+use crate::ir::condcodes::IntCC;
+use crate::ir::Function;
+use crate::isa::{Builder as IsaBuilder, TargetIsa};
+use crate::machinst::{
+    compile, MachCompileResult, MachTextSectionBuilder, TextSectionBuilder, VCode,
+};
+use crate::result::CodegenResult;
+use crate::settings;
 
-use super::super::settings as shared_settings;
-#[cfg(feature = "testing_hooks")]
-use crate::binemit::CodeSink;
-use crate::binemit::{emit_function, MemoryCodeSink};
-use crate::ir;
-use crate::isa::enc_tables::{self as shared_enc_tables, lookup_enclist, Encodings};
-use crate::isa::Builder as IsaBuilder;
-use crate::isa::{EncInfo, RegClass, RegInfo, TargetIsa};
-use crate::regalloc;
-use alloc::borrow::Cow;
-use alloc::boxed::Box;
-use core::any::Any;
+use alloc::{boxed::Box, vec::Vec};
 use core::fmt;
-use target_lexicon::{Architecture, Triple};
+use regalloc::{PrettyPrint, RealRegUniverse};
+use target_lexicon::{Architecture, ArmArchitecture, Triple};
 
-#[allow(dead_code)]
-struct Isa {
+// New backend:
+mod abi;
+mod inst;
+mod lower;
+mod lower_inst;
+
+use inst::{create_reg_universe, EmitInfo};
+
+/// An ARM32 backend.
+pub struct Arm32Backend {
     triple: Triple,
-    shared_flags: shared_settings::Flags,
-    isa_flags: settings::Flags,
-    cpumode: &'static [shared_enc_tables::Level1Entry<u16>],
+    flags: settings::Flags,
+    reg_universe: RealRegUniverse,
 }
 
-/// Get an ISA builder for creating ARM32 targets.
-pub fn isa_builder(triple: Triple) -> IsaBuilder {
-    IsaBuilder {
-        triple,
-        setup: settings::builder(),
-        constructor: isa_constructor,
+impl Arm32Backend {
+    /// Create a new ARM32 backend with the given (shared) flags.
+    pub fn new_with_flags(triple: Triple, flags: settings::Flags) -> Arm32Backend {
+        let reg_universe = create_reg_universe();
+        Arm32Backend {
+            triple,
+            flags,
+            reg_universe,
+        }
+    }
+
+    fn compile_vcode(
+        &self,
+        func: &Function,
+        flags: settings::Flags,
+    ) -> CodegenResult<VCode<inst::Inst>> {
+        // This performs lowering to VCode, register-allocates the code, computes
+        // block layout and finalizes branches. The result is ready for binary emission.
+        let emit_info = EmitInfo::new(flags.clone());
+        let abi = Box::new(abi::Arm32ABICallee::new(func, flags, self.isa_flags())?);
+        compile::compile::<Arm32Backend>(func, self, abi, &self.reg_universe, emit_info)
     }
 }
 
-fn isa_constructor(
-    triple: Triple,
-    shared_flags: shared_settings::Flags,
-    builder: shared_settings::Builder,
-) -> Box<dyn TargetIsa> {
-    let level1 = match triple.architecture {
-        Architecture::Arm(arm) => {
-            if arm.is_thumb() {
-                &enc_tables::LEVEL1_T32[..]
-            } else {
-                &enc_tables::LEVEL1_A32[..]
-            }
-        }
-        _ => panic!(),
-    };
-    Box::new(Isa {
-        triple,
-        isa_flags: settings::Flags::new(&shared_flags, builder),
-        shared_flags,
-        cpumode: level1,
-    })
-}
+impl TargetIsa for Arm32Backend {
+    fn compile_function(
+        &self,
+        func: &Function,
+        want_disasm: bool,
+    ) -> CodegenResult<MachCompileResult> {
+        let flags = self.flags();
+        let vcode = self.compile_vcode(func, flags.clone())?;
+        let (buffer, bb_starts, bb_edges) = vcode.emit();
+        let frame_size = vcode.frame_size();
+        let stackslot_offsets = vcode.stackslot_offsets().clone();
 
-impl TargetIsa for Isa {
+        let disasm = if want_disasm {
+            Some(vcode.show_rru(Some(&create_reg_universe())))
+        } else {
+            None
+        };
+
+        let buffer = buffer.finish();
+
+        Ok(MachCompileResult {
+            buffer,
+            frame_size,
+            disasm,
+            value_labels_ranges: Default::default(),
+            stackslot_offsets,
+            bb_starts,
+            bb_edges,
+        })
+    }
+
     fn name(&self) -> &'static str {
         "arm32"
     }
@@ -70,80 +92,57 @@ impl TargetIsa for Isa {
         &self.triple
     }
 
-    fn flags(&self) -> &shared_settings::Flags {
-        &self.shared_flags
+    fn flags(&self) -> &settings::Flags {
+        &self.flags
     }
 
-    fn register_info(&self) -> RegInfo {
-        registers::INFO.clone()
+    fn isa_flags(&self) -> Vec<settings::Value> {
+        Vec::new()
     }
 
-    fn encoding_info(&self) -> EncInfo {
-        enc_tables::INFO.clone()
-    }
-
-    fn legal_encodings<'a>(
-        &'a self,
-        func: &'a ir::Function,
-        inst: &'a ir::InstructionData,
-        ctrl_typevar: ir::Type,
-    ) -> Encodings<'a> {
-        lookup_enclist(
-            ctrl_typevar,
-            inst,
-            func,
-            self.cpumode,
-            &enc_tables::LEVEL2[..],
-            &enc_tables::ENCLISTS[..],
-            &enc_tables::LEGALIZE_ACTIONS[..],
-            &enc_tables::RECIPE_PREDICATES[..],
-            &enc_tables::INST_PREDICATES[..],
-            self.isa_flags.predicate_view(),
-        )
-    }
-
-    fn legalize_signature(&self, sig: &mut Cow<ir::Signature>, current: bool) {
-        abi::legalize_signature(sig, &self.triple, current)
-    }
-
-    fn regclass_for_abi_type(&self, ty: ir::Type) -> RegClass {
-        abi::regclass_for_abi_type(ty)
-    }
-
-    fn allocatable_registers(&self, func: &ir::Function) -> regalloc::RegisterSet {
-        abi::allocatable_registers(func)
-    }
-
-    #[cfg(feature = "testing_hooks")]
-    fn emit_inst(
+    #[cfg(feature = "unwind")]
+    fn emit_unwind_info(
         &self,
-        func: &ir::Function,
-        inst: ir::Inst,
-        divert: &mut regalloc::RegDiversions,
-        sink: &mut dyn CodeSink,
-    ) {
-        binemit::emit_inst(func, inst, divert, sink, self)
+        _result: &MachCompileResult,
+        _kind: crate::machinst::UnwindInfoKind,
+    ) -> CodegenResult<Option<crate::isa::unwind::UnwindInfo>> {
+        Ok(None) // FIXME implement this
     }
 
-    fn emit_function_to_memory(&self, func: &ir::Function, sink: &mut MemoryCodeSink) {
-        emit_function(func, binemit::emit_inst, sink, self)
+    fn unsigned_add_overflow_condition(&self) -> IntCC {
+        // Carry flag set.
+        IntCC::UnsignedGreaterThanOrEqual
     }
 
-    fn unsigned_add_overflow_condition(&self) -> ir::condcodes::IntCC {
-        ir::condcodes::IntCC::UnsignedLessThan
-    }
-
-    fn unsigned_sub_overflow_condition(&self) -> ir::condcodes::IntCC {
-        ir::condcodes::IntCC::UnsignedGreaterThanOrEqual
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self as &dyn Any
+    fn text_section_builder(&self, num_funcs: u32) -> Box<dyn TextSectionBuilder> {
+        Box::new(MachTextSectionBuilder::<inst::Inst>::new(num_funcs))
     }
 }
 
-impl fmt::Display for Isa {
+impl fmt::Display for Arm32Backend {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}\n{}", self.shared_flags, self.isa_flags)
+        f.debug_struct("MachBackend")
+            .field("name", &self.name())
+            .field("triple", &self.triple())
+            .field("flags", &format!("{}", self.flags()))
+            .finish()
+    }
+}
+
+/// Create a new `isa::Builder`.
+pub fn isa_builder(triple: Triple) -> IsaBuilder {
+    assert!(match triple.architecture {
+        Architecture::Arm(ArmArchitecture::Arm)
+        | Architecture::Arm(ArmArchitecture::Armv7)
+        | Architecture::Arm(ArmArchitecture::Armv6) => true,
+        _ => false,
+    });
+    IsaBuilder {
+        triple,
+        setup: settings::builder(),
+        constructor: |triple, shared_flags, _| {
+            let backend = Arm32Backend::new_with_flags(triple, shared_flags);
+            Box::new(backend)
+        },
     }
 }

@@ -11,7 +11,6 @@ use crate::packed_option::PackedOption;
 use crate::timing;
 use core::cmp;
 use core::iter::{IntoIterator, Iterator};
-use log::debug;
 
 /// The `Layout` struct determines the layout of blocks and instructions in a function. It does not
 /// contain definitions of instructions or blocks, but depends on `Inst` and `Block` entity references
@@ -328,7 +327,7 @@ impl Layout {
                 next_inst = self.insts[inst].next.expand();
             }
         }
-        debug!("Renumbered {} program points", seq / MAJOR_STRIDE);
+        log::trace!("Renumbered {} program points", seq / MAJOR_STRIDE);
     }
 }
 
@@ -470,6 +469,19 @@ impl Layout {
     pub fn next_block(&self, block: Block) -> Option<Block> {
         self.blocks[block].next.expand()
     }
+
+    /// Mark a block as "cold".
+    ///
+    /// This will try to move it out of the ordinary path of execution
+    /// when lowered to machine code.
+    pub fn set_cold(&mut self, block: Block) {
+        self.blocks[block].cold = true;
+    }
+
+    /// Is the given block cold?
+    pub fn is_cold(&self, block: Block) -> bool {
+        self.blocks[block].cold
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -479,9 +491,10 @@ struct BlockNode {
     first_inst: PackedOption<Inst>,
     last_inst: PackedOption<Inst>,
     seq: SequenceNumber,
+    cold: bool,
 }
 
-/// Iterate over blocks in layout order. See `Layout::blocks()`.
+/// Iterate over blocks in layout order. See [crate::ir::layout::Layout::blocks].
 pub struct Blocks<'f> {
     layout: &'f Layout,
     next: Option<Block>,
@@ -778,6 +791,97 @@ impl<'f> DoubleEndedIterator for Insts<'f> {
             }
         }
         rval
+    }
+}
+
+/// A custom serialize and deserialize implementation for [`Layout`].
+///
+/// This doesn't use a derived implementation as [`Layout`] is a manual implementation of a linked
+/// list. Storing it directly as a regular list saves a lot of space.
+///
+/// The following format is used. (notated in EBNF form)
+///
+/// ```plain
+/// data = block_data * ;
+/// block_data = "block_id" , "inst_count" , ( "inst_id" * ) ;
+/// ```
+#[cfg(feature = "enable-serde")]
+mod serde {
+    use ::serde::de::{Deserializer, Error, SeqAccess, Visitor};
+    use ::serde::ser::{SerializeSeq, Serializer};
+    use ::serde::{Deserialize, Serialize};
+    use core::convert::TryFrom;
+    use core::fmt;
+    use core::marker::PhantomData;
+
+    use super::*;
+
+    impl Serialize for Layout {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let size = self.blocks().count() * 2
+                + self
+                    .blocks()
+                    .map(|block| self.block_insts(block).count())
+                    .sum::<usize>();
+            let mut seq = serializer.serialize_seq(Some(size))?;
+            for block in self.blocks() {
+                seq.serialize_element(&block)?;
+                seq.serialize_element(&u32::try_from(self.block_insts(block).count()).unwrap())?;
+                for inst in self.block_insts(block) {
+                    seq.serialize_element(&inst)?;
+                }
+            }
+            seq.end()
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Layout {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_seq(LayoutVisitor {
+                marker: PhantomData,
+            })
+        }
+    }
+
+    struct LayoutVisitor {
+        marker: PhantomData<fn() -> Layout>,
+    }
+
+    impl<'de> Visitor<'de> for LayoutVisitor {
+        type Value = Layout;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            write!(formatter, "a `cranelift_codegen::ir::Layout`")
+        }
+
+        fn visit_seq<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+        where
+            M: SeqAccess<'de>,
+        {
+            let mut layout = Layout::new();
+
+            while let Some(block) = access.next_element::<Block>()? {
+                layout.append_block(block);
+
+                let count = access
+                    .next_element::<u32>()?
+                    .ok_or_else(|| Error::missing_field("count"))?;
+                for _ in 0..count {
+                    let inst = access
+                        .next_element::<Inst>()?
+                        .ok_or_else(|| Error::missing_field("inst"))?;
+                    layout.append_inst(inst, block);
+                }
+            }
+
+            Ok(layout)
+        }
     }
 }
 

@@ -13,30 +13,30 @@
         clippy::float_arithmetic,
         clippy::mut_mut,
         clippy::nonminimal_bool,
-        clippy::option_map_unwrap_or,
-        clippy::option_map_unwrap_or_else,
-        clippy::print_stdout,
+        clippy::map_unwrap_or,
+        clippy::clippy::print_stdout,
         clippy::unicode_not_nfc,
         clippy::use_self
     )
 )]
 
 mod code_memory;
-mod compiler;
-mod imports;
+mod debug;
+mod demangling;
 mod instantiate;
 mod link;
-mod resolver;
+mod mmap_vec;
+mod profiling;
 mod unwind;
 
-pub mod native;
-pub mod trampoline;
-
 pub use crate::code_memory::CodeMemory;
-pub use crate::compiler::{make_trampoline, Compilation, CompilationStrategy, Compiler};
-pub use crate::instantiate::{CompiledModule, SetupError};
-pub use crate::link::link_module;
-pub use crate::resolver::{NullResolver, Resolver};
+pub use crate::instantiate::{
+    finish_compile, subslice_range, CompiledModule, CompiledModuleInfo, SetupError,
+    SymbolizeContext, TypeTables,
+};
+pub use crate::mmap_vec::MmapVec;
+pub use demangling::*;
+pub use profiling::*;
 
 /// Version number of this crate.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

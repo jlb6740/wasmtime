@@ -1,57 +1,31 @@
 //! Memory management for executable code.
 
-use crate::unwind::UnwindRegistry;
-use region;
+use crate::unwind::UnwindRegistration;
+use crate::MmapVec;
+use anyhow::{bail, Context, Result};
+use object::read::{File, Object, ObjectSection};
 use std::mem::ManuallyDrop;
-use std::{cmp, mem};
-use wasmtime_environ::{
-    isa::{unwind::UnwindInfo, TargetIsa},
-    Compilation, CompiledFunction, Relocation, Relocations,
-};
-use wasmtime_runtime::{Mmap, VMFunctionBody};
 
-type CodeMemoryRelocations = Vec<(u32, Vec<Relocation>)>;
-
-struct CodeMemoryEntry {
-    mmap: ManuallyDrop<Mmap>,
-    registry: ManuallyDrop<UnwindRegistry>,
-    relocs: CodeMemoryRelocations,
+/// Management of executable memory within a `MmapVec`
+///
+/// This type consumes ownership of a region of memory and will manage the
+/// executable permissions of the contained JIT code as necessary.
+pub struct CodeMemory {
+    // NB: these are `ManuallyDrop` because `unwind_registration` must be
+    // dropped first since it refers to memory owned by `mmap`.
+    mmap: ManuallyDrop<MmapVec>,
+    unwind_registration: ManuallyDrop<Option<UnwindRegistration>>,
+    published: bool,
 }
 
-impl CodeMemoryEntry {
-    fn with_capacity(cap: usize) -> Result<Self, String> {
-        let mmap = ManuallyDrop::new(Mmap::with_at_least(cap)?);
-        let registry = ManuallyDrop::new(UnwindRegistry::new(mmap.as_ptr() as usize));
-        Ok(Self {
-            mmap,
-            registry,
-            relocs: vec![],
-        })
-    }
-
-    fn range(&self) -> (usize, usize) {
-        let start = self.mmap.as_ptr() as usize;
-        let end = start + self.mmap.len();
-        (start, end)
-    }
-}
-
-impl Drop for CodeMemoryEntry {
+impl Drop for CodeMemory {
     fn drop(&mut self) {
+        // Drop `unwind_registration` before `self.mmap`
         unsafe {
-            // The registry needs to be dropped before the mmap
-            ManuallyDrop::drop(&mut self.registry);
+            ManuallyDrop::drop(&mut self.unwind_registration);
             ManuallyDrop::drop(&mut self.mmap);
         }
     }
-}
-
-/// Memory manager for executable code.
-pub struct CodeMemory {
-    current: Option<CodeMemoryEntry>,
-    entries: Vec<CodeMemoryEntry>,
-    position: usize,
-    published: usize,
 }
 
 fn _assert() {
@@ -59,247 +33,174 @@ fn _assert() {
     _assert_send_sync::<CodeMemory>();
 }
 
+/// Result of publishing a `CodeMemory`, containing references to the parsed
+/// internals.
+pub struct Publish<'a> {
+    /// The parsed ELF image that resides within the original `MmapVec`.
+    pub obj: File<'a>,
+
+    /// Reference to the entire `MmapVec` and its contents.
+    pub mmap: &'a [u8],
+
+    /// Reference to just the text section of the object file, a subslice of
+    /// `mmap`.
+    pub text: &'a [u8],
+}
+
 impl CodeMemory {
-    /// Create a new `CodeMemory` instance.
-    pub fn new() -> Self {
-        Self {
-            current: None,
-            entries: Vec::new(),
-            position: 0,
-            published: 0,
-        }
-    }
-
-    /// Allocate a continuous memory block for a single compiled function.
-    /// TODO: Reorganize the code that calls this to emit code directly into the
-    /// mmap region rather than into a Vec that we need to copy in.
-    pub fn allocate_for_function<'a>(
-        &mut self,
-        func: &'a CompiledFunction,
-        relocs: impl Iterator<Item = &'a Relocation>,
-    ) -> Result<&mut [VMFunctionBody], String> {
-        let size = Self::function_allocation_size(func);
-
-        let (buf, registry, start, m_relocs) = self.allocate(size)?;
-
-        let (_, _, vmfunc) = Self::copy_function(func, start as u32, buf, registry);
-
-        Self::copy_relocs(m_relocs, start as u32, relocs);
-
-        Ok(vmfunc)
-    }
-
-    /// Allocate a continuous memory block for a compilation.
-    pub fn allocate_for_compilation(
-        &mut self,
-        compilation: &Compilation,
-        relocations: &Relocations,
-    ) -> Result<Box<[&mut [VMFunctionBody]]>, String> {
-        let total_len = compilation
-            .into_iter()
-            .fold(0, |acc, func| acc + Self::function_allocation_size(func));
-
-        let (mut buf, registry, start, m_relocs) = self.allocate(total_len)?;
-        let mut result = Vec::with_capacity(compilation.len());
-        let mut start = start as u32;
-
-        for (func, relocs) in compilation.into_iter().zip(relocations.values()) {
-            let (next_start, next_buf, vmfunc) = Self::copy_function(func, start, buf, registry);
-
-            result.push(vmfunc);
-
-            Self::copy_relocs(m_relocs, start, relocs.iter());
-
-            start = next_start;
-            buf = next_buf;
-        }
-
-        Ok(result.into_boxed_slice())
-    }
-
-    /// Make all allocated memory executable.
-    pub fn publish(&mut self, isa: &dyn TargetIsa) {
-        self.push_current(0)
-            .expect("failed to push current memory map");
-
-        for CodeMemoryEntry {
-            mmap: m,
-            registry: r,
-            relocs,
-        } in &mut self.entries[self.published..]
+    /// Creates a new `CodeMemory` by taking ownership of the provided
+    /// `MmapVec`.
+    ///
+    /// The returned `CodeMemory` manages the internal `MmapVec` and the
+    /// `publish` method is used to actually make the memory executable.
+    pub fn new(mmap: MmapVec) -> Self {
+        #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
         {
-            // Remove write access to the pages due to the relocation fixups.
-            r.publish(isa)
-                .expect("failed to publish function unwind registry");
+            // This is a requirement of the `membarrier` call executed by the `publish` method.
+            rustix::process::membarrier(
+                rustix::process::MembarrierCommand::RegisterPrivateExpeditedSyncCore,
+            )
+            .unwrap();
+        }
 
-            if !m.is_empty() {
-                unsafe {
-                    region::protect(m.as_mut_ptr(), m.len(), region::Protection::READ_EXECUTE)
+        Self {
+            mmap: ManuallyDrop::new(mmap),
+            unwind_registration: ManuallyDrop::new(None),
+            published: false,
+        }
+    }
+
+    /// Returns a reference to the underlying `MmapVec` this memory owns.
+    pub fn mmap(&self) -> &MmapVec {
+        &self.mmap
+    }
+
+    /// Publishes the internal ELF image to be ready for execution.
+    ///
+    /// This method can only be called once and will panic if called twice. This
+    /// will parse the ELF image from the original `MmapVec` and do everything
+    /// necessary to get it ready for execution, including:
+    ///
+    /// * Change page protections from read/write to read/execute.
+    /// * Register unwinding information with the OS
+    ///
+    /// After this function executes all JIT code should be ready to execute.
+    /// The various parsed results of the internals of the `MmapVec` are
+    /// returned through the `Publish` structure.
+    pub fn publish(&mut self) -> Result<Publish<'_>> {
+        assert!(!self.published);
+        self.published = true;
+
+        let mut ret = Publish {
+            obj: File::parse(&self.mmap[..])
+                .with_context(|| "failed to parse internal compilation artifact")?,
+            mmap: &self.mmap,
+            text: &[],
+        };
+        let mmap_ptr = self.mmap.as_ptr() as u64;
+
+        // Sanity-check that all sections are aligned correctly.
+        for section in ret.obj.sections() {
+            let data = match section.data() {
+                Ok(data) => data,
+                Err(_) => continue,
+            };
+            if section.align() == 0 || data.len() == 0 {
+                continue;
+            }
+            if (data.as_ptr() as u64 - mmap_ptr) % section.align() != 0 {
+                bail!(
+                    "section `{}` isn't aligned to {:#x}",
+                    section.name().unwrap_or("ERROR"),
+                    section.align()
+                );
+            }
+        }
+
+        // Find the `.text` section with executable code in it.
+        let text = match ret.obj.section_by_name(".text") {
+            Some(section) => section,
+            None => return Ok(ret),
+        };
+        ret.text = match text.data() {
+            Ok(data) if !data.is_empty() => data,
+            _ => return Ok(ret),
+        };
+
+        // The unsafety here comes from a few things:
+        //
+        // * First in `apply_reloc` we're walking around the `File` that the
+        //   `object` crate has to get a mutable view into the text section.
+        //   Currently the `object` crate doesn't support easily parsing a file
+        //   and updating small bits and pieces of it, so we work around it for
+        //   now. ELF's file format should guarantee that `text_mut` doesn't
+        //   collide with any memory accessed by `text.relocations()`.
+        //
+        // * Second we're actually updating some page protections to executable
+        //   memory.
+        //
+        // * Finally we're registering unwinding information which relies on the
+        //   correctness of the information in the first place. This applies to
+        //   both the actual unwinding tables as well as the validity of the
+        //   pointers we pass in itself.
+        unsafe {
+            let text_mut =
+                std::slice::from_raw_parts_mut(ret.text.as_ptr() as *mut u8, ret.text.len());
+            let text_offset = ret.text.as_ptr() as usize - ret.mmap.as_ptr() as usize;
+            let text_range = text_offset..text_offset + text_mut.len();
+            let mut text_section_readwrite = false;
+            for (offset, r) in text.relocations() {
+                // If the text section was mapped at readonly we need to make it
+                // briefly read/write here as we apply relocations.
+                if !text_section_readwrite && self.mmap.is_readonly() {
+                    self.mmap
+                        .make_writable(text_range.clone())
+                        .expect("unable to make memory writable");
+                    text_section_readwrite = true;
                 }
-                .expect("unable to make memory readonly and executable");
+                crate::link::apply_reloc(&ret.obj, text_mut, offset, r);
             }
 
-            // Relocs data in not needed anymore -- clearing.
-            // TODO use relocs to serialize the published code.
-            relocs.clear();
-        }
+            // Switch the executable portion from read/write to
+            // read/execute, notably not using read/write/execute to prevent
+            // modifications.
+            self.mmap
+                .make_executable(text_range.clone())
+                .expect("unable to make memory executable");
 
-        self.published = self.entries.len();
-    }
-
-    /// Allocate `size` bytes of memory which can be made executable later by
-    /// calling `publish()`. Note that we allocate the memory as writeable so
-    /// that it can be written to and patched, though we make it readonly before
-    /// actually executing from it.
-    ///
-    /// A few values are returned:
-    ///
-    /// * A mutable slice which references the allocated memory
-    /// * A function table instance where unwind information is registered
-    /// * The offset within the current mmap that the slice starts at
-    ///
-    /// TODO: Add an alignment flag.
-    fn allocate(
-        &mut self,
-        size: usize,
-    ) -> Result<
-        (
-            &mut [u8],
-            &mut UnwindRegistry,
-            usize,
-            &mut CodeMemoryRelocations,
-        ),
-        String,
-    > {
-        assert!(size > 0);
-
-        if match &self.current {
-            Some(e) => e.mmap.len() - self.position < size,
-            None => true,
-        } {
-            self.push_current(cmp::max(0x10000, size))?;
-        }
-
-        let old_position = self.position;
-        self.position += size;
-
-        let e = self.current.as_mut().unwrap();
-
-        Ok((
-            &mut e.mmap.as_mut_slice()[old_position..self.position],
-            &mut e.registry,
-            old_position,
-            &mut e.relocs,
-        ))
-    }
-
-    /// Calculates the allocation size of the given compiled function.
-    fn function_allocation_size(func: &CompiledFunction) -> usize {
-        match &func.unwind_info {
-            Some(UnwindInfo::WindowsX64(info)) => {
-                // Windows unwind information is required to be emitted into code memory
-                // This is because it must be a positive relative offset from the start of the memory
-                // Account for necessary unwind information alignment padding (32-bit alignment)
-                ((func.body.len() + 3) & !3) + info.emit_size()
+            #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+            {
+                // Ensure that no processor has fetched a stale instruction stream.
+                rustix::process::membarrier(
+                    rustix::process::MembarrierCommand::PrivateExpeditedSyncCore,
+                )
+                .unwrap();
             }
-            _ => func.body.len(),
-        }
-    }
 
-    fn copy_relocs<'a>(
-        entry_relocs: &'_ mut CodeMemoryRelocations,
-        start: u32,
-        relocs: impl Iterator<Item = &'a Relocation>,
-    ) {
-        entry_relocs.push((start, relocs.cloned().collect()));
-    }
-
-    /// Copies the data of the compiled function to the given buffer.
-    ///
-    /// This will also add the function to the current unwind registry.
-    fn copy_function<'a>(
-        func: &CompiledFunction,
-        func_start: u32,
-        buf: &'a mut [u8],
-        registry: &mut UnwindRegistry,
-    ) -> (u32, &'a mut [u8], &'a mut [VMFunctionBody]) {
-        let func_len = func.body.len();
-        let mut func_end = func_start + (func_len as u32);
-
-        let (body, mut remainder) = buf.split_at_mut(func_len);
-        body.copy_from_slice(&func.body);
-        let vmfunc = Self::view_as_mut_vmfunc_slice(body);
-
-        if let Some(UnwindInfo::WindowsX64(info)) = &func.unwind_info {
-            // Windows unwind information is written following the function body
-            // Keep unwind information 32-bit aligned (round up to the nearest 4 byte boundary)
-            let unwind_start = (func_end + 3) & !3;
-            let unwind_size = info.emit_size();
-            let padding = (unwind_start - func_end) as usize;
-
-            let (slice, r) = remainder.split_at_mut(padding + unwind_size);
-
-            info.emit(&mut slice[padding..]);
-
-            func_end = unwind_start + (unwind_size as u32);
-            remainder = r;
+            // With all our memory set up use the platform-specific
+            // `UnwindRegistration` implementation to inform the general
+            // runtime that there's unwinding information available for all
+            // our just-published JIT functions.
+            *self.unwind_registration = register_unwind_info(&ret.obj, ret.text)?;
         }
 
-        if let Some(info) = &func.unwind_info {
-            registry
-                .register(func_start, func_len as u32, info)
-                .expect("failed to register unwind information");
-        }
-
-        (func_end, remainder, vmfunc)
+        Ok(ret)
     }
+}
 
-    /// Convert mut a slice from u8 to VMFunctionBody.
-    fn view_as_mut_vmfunc_slice(slice: &mut [u8]) -> &mut [VMFunctionBody] {
-        let byte_ptr: *mut [u8] = slice;
-        let body_ptr = byte_ptr as *mut [VMFunctionBody];
-        unsafe { &mut *body_ptr }
+unsafe fn register_unwind_info(obj: &File, text: &[u8]) -> Result<Option<UnwindRegistration>> {
+    let unwind_info = match obj
+        .section_by_name(UnwindRegistration::section_name())
+        .and_then(|s| s.data().ok())
+    {
+        Some(info) => info,
+        None => return Ok(None),
+    };
+    if unwind_info.len() == 0 {
+        return Ok(None);
     }
-
-    /// Pushes the current entry and allocates a new one with the given size.
-    fn push_current(&mut self, new_size: usize) -> Result<(), String> {
-        let previous = mem::replace(
-            &mut self.current,
-            if new_size == 0 {
-                None
-            } else {
-                Some(CodeMemoryEntry::with_capacity(cmp::max(0x10000, new_size))?)
-            },
-        );
-
-        if let Some(e) = previous {
-            self.entries.push(e);
-        }
-
-        self.position = 0;
-
-        Ok(())
-    }
-
-    /// Returns all published segment ranges.
-    pub fn published_ranges<'a>(&'a self) -> impl Iterator<Item = (usize, usize)> + 'a {
-        self.entries[..self.published]
-            .iter()
-            .map(|entry| entry.range())
-    }
-
-    /// Returns all relocations for the unpublished memory.
-    pub fn unpublished_relocations<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = (*const u8, &'a Relocation)> + 'a {
-        self.entries[self.published..]
-            .iter()
-            .chain(self.current.iter())
-            .flat_map(|entry| {
-                entry.relocs.iter().flat_map(move |(start, relocs)| {
-                    let base_ptr = unsafe { entry.mmap.as_ptr().add(*start as usize) };
-                    relocs.iter().map(move |r| (base_ptr, r))
-                })
-            })
-    }
+    Ok(Some(
+        UnwindRegistration::new(text.as_ptr(), unwind_info.as_ptr(), unwind_info.len())
+            .context("failed to create unwind info registration")?,
+    ))
 }

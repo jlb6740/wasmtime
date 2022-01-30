@@ -6,7 +6,7 @@ use crate::shared::types as shared_types;
 use cranelift_codegen_shared::constants;
 
 // Rust name prefix used for the `rust_name` method.
-static _RUST_NAME_PREFIX: &str = "ir::types::";
+static RUST_NAME_PREFIX: &str = "ir::types::";
 
 // ValueType variants (i8, i32, ...) are provided in `shared::types.rs`.
 
@@ -71,25 +71,18 @@ impl ValueType {
     }
 
     /// Find the unique number associated with this type.
-    pub fn number(&self) -> Option<u8> {
+    pub fn number(&self) -> u8 {
         match *self {
-            ValueType::Lane(l) => Some(l.number()),
-            ValueType::Reference(r) => Some(r.number()),
-            ValueType::Special(s) => Some(s.number()),
-            ValueType::Vector(ref v) => Some(v.number()),
+            ValueType::Lane(l) => l.number(),
+            ValueType::Reference(r) => r.number(),
+            ValueType::Special(s) => s.number(),
+            ValueType::Vector(ref v) => v.number(),
         }
     }
 
     /// Return the name of this type for generated Rust source files.
     pub fn rust_name(&self) -> String {
-        format!("{}{}", _RUST_NAME_PREFIX, self.to_string().to_uppercase())
-    }
-
-    /// Return true iff:
-    ///     1. self and other have equal number of lanes
-    ///     2. each lane in self has at least as many bits as a lane in other
-    pub fn _wider_or_equal(&self, rhs: &ValueType) -> bool {
-        (self.lane_count() == rhs.lane_count()) && (self.lane_bits() >= rhs.lane_bits())
+        format!("{}{}", RUST_NAME_PREFIX, self.to_string().to_uppercase())
     }
 
     /// Return the total number of bits of an instance of this type.
@@ -235,20 +228,6 @@ impl LaneType {
             self.into()
         } else {
             ValueType::Vector(VectorType::new(self, lanes.into()))
-        }
-    }
-
-    pub fn is_float(self) -> bool {
-        match self {
-            LaneType::Float(_) => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_int(self) -> bool {
-        match self {
-            LaneType::Int(_) => true,
-            _ => false,
         }
     }
 }
@@ -482,11 +461,7 @@ impl SpecialTypeIterator {
 impl Iterator for SpecialTypeIterator {
     type Item = SpecialType;
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(f) = self.flag_iter.next() {
-            Some(SpecialType::from(f))
-        } else {
-            None
-        }
+        self.flag_iter.next().map(SpecialType::from)
     }
 }
 
