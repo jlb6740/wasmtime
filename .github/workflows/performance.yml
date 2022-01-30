@@ -6,10 +6,10 @@ name: "Performance Testing"
 # Controls when the action will run.
 # Workflow runs when manually triggered using the UI or API.
 on:
-  issue_comment:
-    types: [created, edited]
-  pull_request_review_comment:
-    types: [created, edited]
+  issue_comment
+    #types: [created, edited]
+  pull_request_review_comment
+  #  types: [created, edited]
 
 # Env variables
 env:
