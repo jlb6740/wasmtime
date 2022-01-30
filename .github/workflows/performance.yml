@@ -8,7 +8,7 @@ name: "Performance Testing"
 on:
   issue_comment
     #types: [created, edited]
-  pull_request_review_comment
+  #pull_request_review_comment
   #  types: [created, edited]
 
 # Env variables
