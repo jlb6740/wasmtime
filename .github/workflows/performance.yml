@@ -8,6 +8,8 @@ name: "Performance Testing"
 on:
   issue_comment:
     types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
 
 # Env variables
 env:
@@ -16,6 +18,7 @@ env:
 jobs:
   Performance_x86-64:
     if: contains(github.event.comment.body, '/bench_x64')
+    #if: contains(github.event.comment.html\_url, '/pull/') && contains(github.event.comment.body, 'commenttest')
     name: Performance x86-64
     runs-on: [self-hosted, linux, x64]
     # Inputs the workflow accepts.
