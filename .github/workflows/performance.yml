@@ -1,15 +1,20 @@
-# This is a workflow triggered by PR or triggered manually
-# Runs quick performance tests and reports the comparison against HEAD
-# Test should take less than 10 minutes to run on current self-hosted devices
-name: "Performance Testing"
+# This workflow is triggered if the string '/bench_x64' or
+# /bench_arch64 is found in a newly created or edited PR
+# comment from a user listed in the conditional of each job
+# below. The workflow will run a performance test in
+# sightglass (https://github.com/bytecodealliance/sightglass),
+# reporting the comparison of the PR compared to HEAD. The
+# test should take less than 10 minutes to run on current
+# self-hosted devices.
+name: "Sightglass Performance Check-in Test"
 
 # Controls when the action will run.
 # Workflow runs when manually triggered using the UI or API.
 on:
   issue_comment:
     types: [created, edited]
-  #pull_request_review_comment:
-  #  types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
 
 # Env variables
 env:
@@ -17,18 +22,24 @@ env:
 
 jobs:
   Performance_x86-64:
-    if: contains(github.event.comment.body, '/bench_x64')
+    # Conditional that guards exectuion of the job by both
+    # the target arch and the user requesting the perf
+    # measurement
+    if: >-
+      ${{
+        github.event.issue.pull_request
+        && contains(github.event.comment.body, '/bench_x64')
+        && (('abrown' == github.event.comment.user.login)
+        || ('akirilov-arm' == github.event.comment.user.login)
+        || ('bbouvier' == github.event.comment.user.login)
+        || ('bjorn3' == github.event.comment.user.login)
+        || ('cfallin' == github.event.comment.user.login)
+        || ('fitzgen' == github.event.comment.user.login)
+        || ('jlb6740' == github.event.comment.user.login))
+      }}
     name: Performance x86-64
     runs-on: [self-hosted, linux, x64]
-    # Inputs the workflow accepts.
     steps:
-      - run: echo "This job is now running on a ${{ runner.os }} self-hosted server."
-
-      - run: |
-          echo A comment on PR $NUMBER
-        env:
-          NUMBER: ${{ github.event.issue.number }}
-
       - name: Setup Rust Toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -100,7 +111,6 @@ jobs:
           sed -i '2 i\ |-|-|-|-|' /tmp/results_cycles_summarized_pp_sorted.csv
           sed -i '1 i\ Performance results in clockticks (lower is better):\n' /tmp/results_cycles_summarized_pp_sorted.csv
 
-          #python3 -c "import pandas as pd; pp = pd.read_csv('/tmp/results_cycles_summarized.csv', usecols=['arch','engine','phase', 'mean'], header=0); pp_sorted = pp;  print(pp_sorted.to_string(index=False)); pp_sorted.insert(4, '%Change (1-Head/Patch)',[ 1 -pp_sorted.loc[0][3]/pp_sorted.loc[3][3], 0, 1-pp_sorted.loc[1][3]/pp_sorted.loc[4][3],0, 1-pp_sorted.loc[2][3]/pp_sorted.loc[5][3] ,0], True); print(pp_sorted)"  > /tmp/results_cycles_summarized_pp_sorted2.csv
           python3 -c "import pandas as pd; pp = pd.read_csv('/tmp/results_cycles_summarized.csv', usecols=['arch','engine','phase', 'mean'], header=0); pp_sorted = pp; pp_sorted.insert(4, '%Change_(1-Head/Patch)',[ 1 -pp_sorted.loc[0][3]/pp_sorted.loc[3][3], 1-pp_sorted.loc[1][3]/pp_sorted.loc[4][3], 1-pp_sorted.loc[2][3]/pp_sorted.loc[5][3],0,0,0], True); pp_sorted.drop('mean', axis=1, inplace=True);  print(pp_sorted.to_string(index=False))"  > /tmp/results_cycles_summarized_pp_sorted2.csv
           sed -i 's/^/ /' /tmp/results_cycles_summarized_pp_sorted2.csv
           sed -i 's/ \+/|/g' /tmp/results_cycles_summarized_pp_sorted2.csv
@@ -109,44 +119,32 @@ jobs:
           sed -i '/main/d' /tmp/results_cycles_summarized_pp_sorted2.csv
           sed -i '1 i\ Performance results based on clockticks comparison with main HEAD (higher %change shows improvement):\n' /tmp/results_cycles_summarized_pp_sorted2.csv
 
-     # - id: get-comment-body
-     #   name: Get Result
-     #   run: |
-     #     body="$(cat /tmp/results_cycles_summarized_pp_sorted.csv)"
-     #     body="${body//'%'/'%25'}"
-     #     body="${body//$'\n'/'%0A'}"
-     #     body="${body//$'\r'/'%0D'}"
-     #     echo "::set-output name=body::$body"
+      #- name: Find Comment
+      #  uses: peter-evans/find-comment@v1
+      #  id: fc
+      #  with:
+      #    issue-number: ${{ github.event.issue.number }}
+      #    body-includes: '/bench_x64'
+      #    direction: last
 
+      #- run: echo ${{ steps.findPr.outputs.pr }}
+      #- run: echo ${{ github.event.issue.number }}
 
-      - name: Find Comment
-        uses: peter-evans/find-comment@v1
-        id: fc
+      - id: get-comment-body
+        name: Get Result
+        run: |
+          body="$(cat /tmp/results_cycles_summarized_pp_sorted2.csv)"
+          body="${body//'%'/'%25'}"
+          body="${body//$'\n'/'%0A'}"
+          body="${body//$'\r'/'%0D'}"
+          echo "::set-output name=body::$body"
+
+      - name: Publish Results 2
+        uses: peter-evans/create-or-update-comment@v1
         with:
           issue-number: ${{ github.event.issue.number }}
-          body-includes: '/bench_x64'
-          direction: last
-
-      #- name: Find PR
-      #  uses: jwalton/gh-find-current-pr@v1
-      #  id: findPr
-      #  with:
-          # Can be "open", "closed", or "all".  Defaults to "open".
-      #    state: open
-
-      - run: echo ${{ steps.findPr.outputs.pr }}
-      #- run: echo ${{ steps.fc.outputs.comment-id }}
-      - run: echo ${{ github.event.issue.number }}
-
-       # echo "${{ steps.findPr.outputs.pr }}"
-       # echo "${{ steps.fc.outputs.comment-id }}"
-
-     # - name: Publish Results
-     #   uses: peter-evans/create-or-update-comment@v1
-     #   with:
-     #     issue-number: ${{ steps.findPr.outputs.pr }}
-     #     reactions: rocket
-     #     body: ${{ steps.get-comment-body.outputs.body }}
+          reactions: rocket
+          body: ${{ steps.get-comment-body.outputs.body }}
 
       - id: get-comment-body2
         name: Get Result 2
@@ -157,15 +155,19 @@ jobs:
           body2="${body2//$'\r'/'%0D'}"
           echo "::set-output name=body2::$body2"
 
-      - name: Publish Results 2
-        uses: peter-evans/create-or-update-comment@v1
+      - run: echo "${{ steps.get-comment-body2.outputs.body2 }}"
+      - name: Publish Results
+        uses: actions/github-script@v6
         with:
-          #issue-number: ${{ steps.findPr.outputs.pr }}
-          issue-number: ${{ github.event.issue.number }}
-          #comment-id: ${{ steps.fc.outputs.comment-id }}
-          reactions: rocket
-          body: ${{ steps.get-comment-body2.outputs.body2 }}
+          script: |
+            github.rest.issues.createComment({
+              issue_number: ${{ github.event.issue.number }},
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: ${{ steps.get-comment-body2.outputs.body2 }}
+            })
 
+#              body: '👋 Thanks for reporting!'
  # Performance_Aarch64:
  #   name: Performance Aarch64
  #   runs-on: [self-hosted, linux, x86-64]
