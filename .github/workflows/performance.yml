@@ -117,7 +117,7 @@ jobs:
         uses: jwalton/gh-find-current-pr@v1
         id: findPr
         with:
-          # Can be "open", "closed", or "all".  Defaults to "open".
+          # Can be "open", "closed", or "all".
           state: open
 
       - run: echo ${{ steps.findPr.outputs.pr }}
