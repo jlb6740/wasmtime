@@ -1,0 +1,102 @@
+# This is a workflow triggered by PR or triggered manually
+# Runs quick performance tests and reports the comparison against HEAD
+# Test should take less than 10 minutes to run on current self-hosted devices
+name: "Performance Testing"
+
+# Controls when the action will run.
+# This workflow runs when manually triggered using the UI or API.
+on:
+  issue_comment:
+    types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+  push:
+  workflow_dispatch:
+      inputs:
+        actor:
+          type: string
+          required: false
+        pr_number:
+          type: string
+          required: false
+          default: ''
+        post_results:
+          type: boolean
+          required: false
+          default: false
+        repository:
+          description: 'Repository for the commit'
+          type: string
+          default: 'bytecodealliance/wasmtime'
+          required: true
+        ref:
+          description: 'Ref for the commit'
+          type: string
+          default: 'refs/heads/main'
+          required: true
+        sg_commit:
+          description: 'Sightglass ref'
+          type: string
+          default: '81c425a'
+          required: false
+        message:
+          type: string
+          default: 'Triggered by Wasmtime workflow dispatch'
+          required: false
+
+# Env variables
+env:
+  SG_COMMIT: 649509c
+  TOKEN: ${{ secrets.SIGHTGLASS_BENCHMARKING_TOKEN }}
+  GITHUB_CONTEXT: ${{ toJson(github) }}
+
+jobs:
+  Sightglass_x86-64_from_pr_comment:
+    name: Sightglass x86-64_from_pr_comment
+    runs-on: ubuntu-latest
+    if: |
+      startsWith(github.event.comment.body, '/bench_x64') &&
+      (github.event.issue.pull_request) &&
+      (('abrown' == github.event.comment.user.login)
+        || ('akirilov-arm' == github.event.comment.user.login)
+        || ('bbouvier' == github.event.comment.user.login)
+        || ('bjorn3' == github.event.comment.user.login)
+        || ('cfallin' == github.event.comment.user.login)
+        || ('fitzgen' == github.event.comment.user.login)
+        || ('jlb6740' == github.event.comment.user.login))
+    steps:
+      - run: echo "$GITHUB_CONTEXT"
+      - run: echo "PR Comment"
+
+#        name: Set Variables
+#      - run: |
+#          curl -X POST -H "Accept: application/vnd.github.v3+json" \
+#           -H "Authorization: token ${{ env.TOKEN }}" \
+#           https://api.github.com/repos/bytecodealliance/wasmtime-sightglass-benchmarking/dispatches \
+#           -d '{"event_type":"bench-sightglass", "client_payload":{"message":"${{ env.MESSAGE }}", "actor":"jlb6740", "repository":"jlb6740/wasmtime", "ref":"refs/heads/add-sg-benchmarking-workflow", "pr_number":"4", "publish":"true" }}'
+
+  Sightglass_x86-64_from_workflow_dispatch:
+    name: Performance x86-64_from_workflow_dispatch
+    runs-on: ubuntu-latest
+    if: (github.event.issue.worflow_dispatch) || (github.event_name == 'push')
+    steps:
+      - run: echo "$GITHUB_CONTEXT"
+      - run: echo "Dispatch"
+#    name: Performance x86-64_from_dispatch
+#       runs-on: ubuntu-latest
+#    steps:
+#      - run: echo "$GITHUB_CONTEXT"
+#
+#      - name: Set Variables
+#        if: ${{ github.event_name == 'comment_dispatch' }}
+#        run: |
+#          echo "MESSAGE=${{ github.event.inputs.message }}" >> $GITHUB_ENV
+#
+#      - run: |
+#          curl -X POST -H "Accept: application/vnd.github.v3+json" \
+#          -H "Authorization: token ${{ env.TOKEN }}" \
+#          https://api.github.com/repos/bytecodealliance/wasmtime-sightglass-benchmarking/dispatches \
+#          -d '{"event_type":"bench-sightglass", "client_payload":{"message":"${{ env.MESSAGE }}", "actor":"jlb6740", "repository":"jlb6740/wasmtime", "ref":"refs/heads/add-sg-benchmarking-workflow", "pr_number":"4", "publish":"true" }}'
+
+
+
