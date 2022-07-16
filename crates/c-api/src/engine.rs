@@ -1,5 +1,6 @@
 use crate::wasm_config_t;
 use wasmtime::Engine;
+use wasmtime::*;
 
 #[repr(C)]
 #[derive(Clone)]
@@ -21,9 +22,11 @@ pub extern "C" fn wasm_engine_new() -> Box<wasm_engine_t> {
     // can be called multiple times, so we just ignore the result.
     drop(env_logger::try_init());
 
-    Box::new(wasm_engine_t {
-        engine: Engine::default(),
-    })
+    // Default to provide debug and vtune support
+    let mut wasm_config = wasm_config_t { config: Config::new() };
+    wasm_config.config.debug_info(true);
+    wasm_config.config.profiler(ProfilingStrategy::VTune).unwrap();
+    wasm_engine_new_with_config(Box::new(wasm_config))
 }
 
 #[no_mangle]
