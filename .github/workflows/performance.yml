@@ -58,8 +58,8 @@ jobs:
           git checkout -b wasmtime-performance-testing/FB/${{ github.ref_name }}/${{ github.sha }}
           echo ${{ github.event.commits[0].committer.name  }}
           echo "email - ${{ github.event.commits[0].committer.email }}"
-          git config user.name '${{ github.event.commits[0].committer.name }}'
-          git config user.email '${{ github.event.commits[0].committer.email }}'
+          git config user.name 'Johnnie Birch'
+          git config user.email 'johnnie.l.birch.jr@intel.com'
           git commit --allow-empty -m "${GITHUB_CONTEXT}"
           git push origin wasmtime-performance-testing/FB/${{ github.ref_name }}/${{ github.sha }}
           #curl -X POST -H "Accept: application/vnd.github.v3+json" -H "Authorization: token ${{ env.TOKEN }}" https://api.github.com/repos/bytecodealliance/wasmtime-sightglass-benchmarking/dispatches -d '{"event_type":"Performance Testing", "client_payload":{"message":"${{ env.MESSAGE }}", "actor":"${{ env.ACTOR }}", "repository":"${{ env.REPOSITORY }}", "ref":"${{ env.REFS }}", "pr_number":"${{ env.PR_NUMBER }}", "publish":"${{ env.PUBLISH }}" }'
