@@ -6,9 +6,11 @@ name: "Performance Testing"
 # Controls when the action will run.
 # This workflow runs when manually triggered using the UI or API.
 on:
+  pull_request_review:
+    types: [submitted, edited]
   pull_request_review_comment:
     types: [created, edited]
-#  push:
+  push:
 
 # Env variables
 env:
@@ -22,20 +24,8 @@ jobs:
     name: Benchmark x64 on PR comment Wasmtime repo
     runs-on: ubuntu-latest
 #    if: (github.event_name == 'push') && (github.repository != 'bytecodealliance/wasmtime-sightglass-benchmarking')
-    if: |
-      startsWith(github.event.comment.body, '/bench_x64') &&
-      (github.event.issue.pull_request_review_comment) &&
-      (('abrown' == github.event.comment.user.login)
-        || ('afonso360' == github.event.comment.user.login)
-        || ('akirilov-arm' == github.event.comment.user.login)
-        || ('alexcrichton' == github.event.comment.user.login)
-        || ('bbouvier' == github.event.comment.user.login)
-        || ('bjorn3' == github.event.comment.user.login)
-        || ('cfallin' == github.event.comment.user.login)
-        || ('fitzgen' == github.event.comment.user.login)
-        || ('jlb6740' == github.event.comment.user.login)
-        || ('sparker-arm' == github.event.comment.user.login)
-        || ('uweigand' == github.event.comment.user.login))
+#    if: |
+#      startsWith(github.event.review_comment.body, '/bench_x64')
     steps:
       - run: echo "MESSAGE=Requested from pull request comment." >> $GITHUB_ENV
       - run: echo "ACTOR=${{ github.event.comment.user.login }}" >> $GITHUB_ENV
@@ -67,7 +57,7 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     if: (github.event_name == 'push') && (github.repository == 'bytecodealliance/wasmtime-sightglass-benchmarking')
     steps:
-#      - run: echo "$GITHUB_CONTEXT"
+      - run: echo "$GITHUB_CONTEXT"
       - run: echo "${{ github.event.head_commit.message }}"
 #      - name: "Build sightglass commit '${{ env.SG_COMMIT }}'"
 #        run: |
