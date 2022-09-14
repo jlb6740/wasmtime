@@ -4,7 +4,8 @@
 name: "Performance Testing"
 
 # Controls when the action will run.
-# This workflow runs when manually triggered using the UI or API.
+# This workflow runs when manually triggered by keywords used in the start of a review comment
+# Currently that phrase is /bench_x64. /bench_aarch64 and /bench_both are TODOs.
 on:
   pull_request_review:
     types: [submitted, edited]
@@ -14,10 +15,9 @@ on:
 
 # Env variables
 env:
-  SG_COMMIT: HEAD
+  SG_COMMIT: b4971ae
   TOKEN: ${{ secrets.SIGHTGLASS_BENCHMARKING_TOKEN }}
   GITHUB_CONTEXT: ${{ toJson(github) }}
-  GITHUB_CONTEXT_FROM_PATCH: ""
 
 jobs:
   Wasmtime_Repo_On_PR_Comment:
@@ -38,14 +38,7 @@ jobs:
         || ('sparker-arm' == github.event.review.user.login)
         || ('uweigand' == github.event.review.user.login))
     steps:
-      - run: echo "MESSAGE=Requested from pull request comment." >> $GITHUB_ENV
-      - run: echo "ACTOR=${{ github.event.review.user.login }}" >> $GITHUB_ENV
-      - run: echo "REPOSITORY=${{ github.repository }}" >> $GITHUB_ENV
-      - run: echo "REFS=${{ github.ref }}" >> $GITHUB_ENV
-      - run: echo "PR_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
-      - run: echo "PUBLISH=true" >> $GITHUB_ENV
       - run: echo "$GITHUB_CONTEXT"
-      - run: echo "$GITHUB_ENV"
       - run: |
           # Create and Push Branch
           git clone https://jlb6740:${{env.TOKEN}}@github.com/bytecodealliance/wasmtime-sightglass-benchmarking.git
@@ -54,7 +47,7 @@ jobs:
           git fetch wasmtime refs/pull/*/merge:refs/remotes/wasmtime/pull/*/merge
           git checkout wasmtime/pull/${{ github.ref_name }} -b ${{ github.ref_name }}
           git submodule update --init --recursive
-          git checkout -b wasmtime-performance-testing/${{ github.ref }}/${{ github.sha }}
+          git checkout -b wasmtime/${{ github.ref }}/${{ github.sha }}
           sudo apt install jq
           export commit_url=${{ github.event.pull_request._links.commits.href }}
           echo $commit_url
@@ -63,8 +56,7 @@ jobs:
           git config user.name $(curl -sSL $commit_url | jq -r '.[].commit.committer.name' | tail -n 1)
           git config user.email $(curl -sSL $commit_url | jq -r '.[].commit.committer.email' | tail -n 1)
           git commit --allow-empty -m "${{ github.event.pull_request._links.comments.href }}"
-          git push origin wasmtime-performance-testing/${{ github.ref }}/${{ github.sha }}
-          #curl -X POST -H "Accept: application/vnd.github.v3+json" -H "Authorization: token ${{ env.TOKEN }}" https://api.github.com/repos/bytecodealliance/wasmtime-sightglass-benchmarking/dispatches -d '{"event_type":"Performance Testing", "client_payload":{"message":"${{ env.MESSAGE }}", "actor":"${{ env.ACTOR }}", "repository":"${{ env.REPOSITORY }}", "ref":"${{ env.REFS }}", "pr_number":"${{ env.PR_NUMBER }}", "publish":"${{ env.PUBLISH }}" }'
+          git push origin wasmtime/${{ github.ref }}/${{ github.sha }}
 
   Performance_Repo_On_Push:
     name: Benchmark x64 on push Performance repo
@@ -80,7 +72,7 @@ jobs:
           git checkout ${{env.SG_COMMIT}}
           cargo build --release
 
-      - name: Checkout ${{ env.event.ref_name }}
+      - name: Checkout patch from bytecodealliance/wasmtime
         uses: actions/checkout@v3
         with:
           submodules: true
@@ -88,26 +80,86 @@ jobs:
           ref: ${{ env.event.ref_name }}
           path: wasmtime_commit
 
+      - name: Build patch from bytecodealliance/wasmtime
+        working-directory: ./wasmtime_commit
+        run: |
+          cargo build --release -p wasmtime-bench-api
+          cp target/release/libwasmtime_bench_api.so /tmp/wasmtime_commit.so
 
-#      - name: Build ${{ env.REF }} from ${{ env.REPOSITORY }}
-#        working-directory: ./wasmtime_commit
-#          cargo build --release -p wasmtime-bench-api
-#          cp target/release/libwasmtime_bench_api.so /tmp/wasmtime_commit.so
+      - name: Checkout main from bytecodealliance/wasmtime
+        uses: actions/checkout@v3
+        with:
+          ref: 'main'
+          repository: 'bytecodealliance/wasmtime'
+          submodules: true
+          path: wasmtime_main
 
-          #echo "${{fromJson(GITHUB_CONTEXT_PERFORMANCE).ref}}"
-          #echo "${{fromJson(steps.set_var.outputs.packageJson).version}}"
+      - name: Build main from bytecodealliance/wasmtime
+        working-directory: ./wasmtime_main
+        run: |
+          cargo build -p wasmtime-bench-api
+          cp target/debug/libwasmtime_bench_api.so /tmp/wasmtime_main.so
 
+      - name: Run performance tests
+        working-directory: ../sightglass
+        run: |
+          cargo run -- \
+          benchmark \
+          --processes 1 \
+          --iterations-per-process 2 \
+          --engine /tmp/wasmtime_main.so \
+          --engine /tmp/wasmtime_commit.so \
+          --output-format csv \
+          --output-file /tmp/results.csv \
+          --raw \
+          -- benchmarks/*/benchmark.wasm
+          ./target/release/sightglass-cli summarize --input-format csv  --output-format csv -f /tmp/results.csv > /tmp/results_summarized.csv
 
-#      - name: Checkout main from bytecodealliance/wasmtime
-#        uses: actions/checkout@v3
-#        with:
-#          ref: 'main'
-#          repository: 'bytecodealliance/wasmtime'
-#          submodules: true
-#          path: wasmtime_main
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
 
-#      - name: Build main from bytecodealliance/wasmtime
-#        working-directory: ./wasmtime_main
-#        run: |
-#          cargo build --release -p wasmtime-bench-api
-#          cp target/release/libwasmtime_bench_api.so /tmp/wasmtime_main.so
+      - name: Post Process Results
+        run: |
+          pip3 install pandas numpy
+          grep -v "nanoseconds" /tmp/results_summarized.csv > /tmp/results_cycles_summarized.csv
+          sed -i 's/\/tmp\/wasmtime_commit.so/patch/g' /tmp/results_cycles_summarized.csv
+          sed -i 's/\/tmp\/wasmtime_main.so/main/g' /tmp/results_cycles_summarized.csv
+          sed -i 's/benchmarks-next\///g'  /tmp/results_cycles_summarized.csv
+          sed -i 's/\/benchmark.wasm//g'  /tmp/results_cycles_summarized.csv
+          python3 -c "import pandas as pd; pp = pd.read_csv('/tmp/results_cycles_summarized.csv', \
+          usecols=['arch','engine','wasm', 'phase', 'mean'], header=0); \
+          pp_sorted = pp.sort_values(['wasm', 'phase', 'engine'], ascending=True); \
+          pp_pct_changed=pp_sorted.groupby(['wasm','phase'])['mean'].pct_change().reset_index().rename(columns = {'mean':'pct_change'}); \
+          pp_sorted.index.name = 'index'; \
+          pp_sorted_merged=pp_sorted.merge(pp_pct_changed, on='index'); \
+          pp_sorted_merged[pp_sorted_merged['engine'].str.contains('patch')]; \
+          pp_sorted_merged=pp_sorted_merged[pp_sorted_merged['engine'].str.contains('patch')]; \
+          pp_sorted_merged=pp_sorted_merged[['wasm','arch','phase','pct_change']]; \
+          print(pp_sorted_merged.to_string(index=False));" >  /tmp/results_cycles_summarized_sorted2.csv
+          sed -i 's/^/ /' /tmp/results_cycles_summarized_sorted2.csv
+          sed -i 's/ \+/|/g' /tmp/results_cycles_summarized_sorted2.csv
+          sed -i -z 's/\n/|\n/g' /tmp/results_cycles_summarized_sorted2.csv
+          sed -i '2 i\ |-|-|-|-|' /tmp/results_cycles_summarized_sorted2.csv
+          sed -i '/main/d' /tmp/results_cycles_summarized_sorted2.csv
+          sed -i '1 i\ Patch improvement over main HEAD (x64). Negative shows reduction pct (improvement).\n' /tmp/results_cycles_summarized_sorted2.csv
+
+      - name: Print Results
+        run: cat /tmp/results_cycles_summarized_sorted2.csv
+
+      - id: get-comment-body
+        name: Create Results Body
+        run: |
+            body="$(cat /tmp/results_cycles_summarized_sorted2.csv)"
+            body="${body//'%'/'%25'}"
+            body="${body//$'\n'/'%0A'}"
+            body="${body//$'\r'/'%0D'}"
+            echo "::set-output name=body::$body"
+
+      - name: Publish Results
+        run: |
+          curl -X POST -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${{ secrets.WASMTIME_PUBLISHING_TOKEN }}" \
+          ${{ github.event.head_commit.message }} \
+          -d '{"body": ${{ toJSON(steps.get-comment-body.outputs.body) }}}'
