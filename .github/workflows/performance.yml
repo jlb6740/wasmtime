@@ -35,7 +35,6 @@ jobs:
         || ('jlb6740' == github.event.comment.user.login)
         || ('sparker-arm' == github.event.comment.user.login)
         || ('uweigand' == github.event.comment.user.login))
-
     steps:
       - run: echo "$GITHUB_CONTEXT"
       - run: |
@@ -84,6 +83,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           toolchain: nightly
+          override: true
 
       - name: Build patch from bytecodealliance/wasmtime (pushed and triggering on this perf repo)
         working-directory: ./wasmtime_commit
