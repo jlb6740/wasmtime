@@ -9,6 +9,7 @@ name: "Performance Testing"
 on:
   issue_comment:
     types: [created]
+  push:
 
 # Env variables
 env:
