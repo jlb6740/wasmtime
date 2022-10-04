@@ -45,13 +45,12 @@ jobs:
           git remote add wasmtime ${{ github.event.repository.clone_url }}
           git fetch wasmtime refs/pull/*/merge:refs/remotes/wasmtime/pull/*/merge
           export issue_pr_url=${{ github.event.issue.pull_request.url }}
-          export issue_commits_url=${issue_pr_url}/commits
+          export issue_commits_url=${{ github.event.issue.comments_url }}
           export issue_ref_name=$(curl -sSL $issue_pr_url | jq -r '.head.ref' | head -n 1)
           export issue_number=$(curl -sSL $issue_pr_url | jq -r '.number' | head -n 1)
           export issue_merge_commit_sha=$(curl -sSL $issue_pr_url | jq -r '.merge_commit_sha' | head -n 1)
           git submodule update --init --recursive
           git checkout wasmtime/pull/${issue_number}/merge -b pull/${issue_number}/merge/${issue_merge_commit_sha}
-          export commit_url=${{ github.event.pull_request._links.commits.href }}
           git config user.name $(curl -sSL $issue_commits_url | jq -r '.[].commit.committer.name' | tail -n 1)
           git config user.email $(curl -sSL $issue_commits_url | jq -r '.[].commit.committer.email' | tail -n 1)
           git log -n 1
