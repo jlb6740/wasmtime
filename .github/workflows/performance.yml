@@ -41,7 +41,7 @@ jobs:
       - run: echo "$GITHUB_CONTEXT"
       - run: |
           # Create and Push Branch
-          git clone https://wasmtime-publish:${{secrets.PERSONAL_ACCESS_TOKEN}}@github.com/bytecodealliance/wasmtime-sightglass-benchmarking.git
+          git clone https://wasmtime-publish:${{secrets.SIGHTGLASS_BENCHMARKING_TOKEN}}@github.com/bytecodealliance/wasmtime-sightglass-benchmarking.git
           cd wasmtime-sightglass-benchmarking
           git remote add wasmtime ${{ github.event.repository.clone_url }}
           git fetch wasmtime refs/pull/*/merge:refs/remotes/wasmtime/pull/*/merge
