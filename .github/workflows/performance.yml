@@ -118,11 +118,11 @@ jobs:
       - id: get-comment-body
         name: Create Results Body
         run: |
-            body="$(cat /tmp/results_cycles_summarized_sorted2.csv)"
+            body="$(cat /tmp/results.txt)"
             body="${body//'%'/'%25'}"
             body="${body//$'\n'/'%0A'}"
             body="${body//$'\r'/'%0D'}"
-            echo "body=$body" >> $GITHUB_OUTPUT
+            echo "::set-output name=body::$body"
 
       - name: Publish Results
         run: |
