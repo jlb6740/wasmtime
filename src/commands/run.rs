@@ -164,6 +164,7 @@ impl RunCommand {
         let host = Host::default();
         let mut store = Store::new(&engine, host);
         self.populate_with_wasi(&mut linker, &mut store, &main)?;
+        self.test_benchmark_hacks(&mut linker, &mut store)?;
 
         store.data_mut().limits = self.run.store_limits();
         store.limiter(|t| &mut t.limits);
@@ -572,6 +573,57 @@ impl RunCommand {
     #[cfg(not(feature = "coredump"))]
     fn handle_core_dump(&self, _store: &mut Store<Host>, err: Error) -> Error {
         err
+    }
+
+    fn test_benchmark_hacks(&self, linker: &mut CliLinker, store: &mut Store<Host>) -> Result<()> {
+        match linker {
+            CliLinker::Core(linker) => {
+                linker.func_wrap(
+                    "env",
+                    "host_mul",
+                    |mut caller: wasmtime::Caller<'_, _>, ptr: i32, x: i64, y: i64| {
+                        let state = caller.data();
+                        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+                        let data: &mut [u8] = mem
+                            .data_mut(&mut caller)
+                            .get_mut(ptr as u32 as usize..)
+                            .and_then(|arr| arr.get_mut(..16 as u32 as usize))
+                            .unwrap();
+                        let ptr = data.as_mut_ptr() as *mut i128;
+                        unsafe {
+                            *ptr = x as i128 * y as i128;
+                        }
+                        //println!("memory ptr: {:?}, data: {:?}", ptr as u128, data);
+                        Ok(())
+                    },
+                )?;
+                let wat = r#"
+        (module
+            (import "env" "host_mul" (func (param i32)(param i64)(param i64) ))
+        )
+    "#;
+                let module = Module::new(&linker.engine(), wat)?;
+                linker.instantiate(store, &module)?;
+            }
+            _ => bail!("Not supported for test_benchmark_hacks"),
+        }
+
+        //     match linker {
+        //         CliLinker::Core(linker) => {
+        //             linker.func_wrap("env", "host_mul", |x: i32| x * 2)?;
+        //             let wat = r#"
+        //     (module
+        //         (import "env" "host_mul" (func (param i32) (result i32)))
+        //     )
+        // "#;
+        //             let module = Module::new(&linker.engine(), wat)?;
+        //             linker.instantiate(store, &module)?;
+        //         }
+
+        //         _ => bail!("Not supported for test_benchmark_hacks"),
+        //     }
+
+        Ok(())
     }
 
     /// Populates the given `Linker` with WASI APIs.
