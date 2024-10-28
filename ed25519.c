@@ -7,6 +7,9 @@
 #include <stdio.h>
 
 #define ITERATIONS 10000
+#define MAX_NO_OVERFLOW 2^32 - 1
+uint64_t NO_OVERFLOW = 0;
+uint64_t OVERFLOW = 0;
 
 #if defined(__SIZEOF_INT128__)
 typedef unsigned __int128 uint128_t;
@@ -291,6 +294,8 @@ fe25519_iszero(const fe25519 f)
     return is_zero(s, 32);
 }
 
+#define INT_MUL_OVERFLOW_P(a, b) \
+   __builtin_mul_overflow_p (a, b, (__typeof__ ((a) + (b))) 0)
 
 static void
 fe25519_mul(fe25519 h, const fe25519 f, const fe25519 g)
@@ -301,6 +306,7 @@ fe25519_mul(fe25519 h, const fe25519 f, const fe25519 g)
     uint64_t       f1_19, f2_19, f3_19, f4_19;
     uint64_t       g0, g1, g2, g3, g4;
     uint64_t       r00, r01, r02, r03, r04;
+    uint64_t       test_overflow;
 
     f0 = f[0];
     f1 = f[1];
@@ -319,11 +325,109 @@ fe25519_mul(fe25519 h, const fe25519 f, const fe25519 g)
     f3_19 = 19ULL * f3;
     f4_19 = 19ULL * f4;
 
+
+    #if defined TEST_OVERFLOW_BEFORE
+    if ((f0 < (MAX_NO_OVERFLOW)) && (g0 < (MAX_NO_OVERFLOW))) {
+        ++NO_OVERFLOW;
+         r0 = (uint128_t) (f0 * g0);
+    } else {
+        ++OVERFLOW;
+        r0 = ((uint128_t)f0) * ((uint128_t)g0);
+    }
+    #elif defined TEST_OVERFLOW_AFTER
+	if (!__builtin_umull_overflow(f0, g0, &test_overflow)) {
+        ++NO_OVERFLOW;
+        r0 = (uint128_t) test_overflow;
+    } else {
+        ++OVERFLOW;
+        r0 = ((uint128_t)f0) * ((uint128_t)g0);
+    }
+    #else
     r0 = ((uint128_t)f0) * ((uint128_t)g0);
+    #endif
+
+    #if defined TEST_OVERFLOW_BEFORE
+    if ((f1_19 < (MAX_NO_OVERFLOW)) && (g4 < (MAX_NO_OVERFLOW))) {
+        ++NO_OVERFLOW;
+         r0 += (uint128_t) (f1_19 * g4);
+    } else {
+        ++OVERFLOW;
+        r0 += ((uint128_t)f1_19) * ((uint128_t)g4);
+    }
+    #elif defined TEST_OVERFLOW_AFTER
+	if (!__builtin_umull_overflow(f1_19, g4, &test_overflow)) {
+        ++NO_OVERFLOW;
+        r0 += (uint128_t) test_overflow;
+    } else {
+        ++OVERFLOW;
+        r0 += ((uint128_t)f1_19) * ((uint128_t)g4);
+    }
+    #else
     r0 += ((uint128_t)f1_19) * ((uint128_t)g4);
-    r0 += ((uint128_t)f2_19) * ((uint128_t)g3);
-    r0 += ((uint128_t)f3_19) * ((uint128_t)g2);
-    r0 += ((uint128_t)f4_19) * ((uint128_t)g1);
+    #endif
+
+
+    #if defined TEST_OVERFLOW_BEFORE
+    if ((f2_19 < (MAX_NO_OVERFLOW)) && (g3 < (MAX_NO_OVERFLOW))) {
+        ++NO_OVERFLOW;
+         r0 += (uint128_t) (f2_19 * g3);
+    } else {
+        ++OVERFLOW;
+        r0 += ((uint128_t)f2_19) * ((uint128_t)g3);
+    }
+    #elif defined TEST_OVERFLOW_AFTER
+	if (!__builtin_umull_overflow(f2_19, g3, &test_overflow)) {
+        ++NO_OVERFLOW;
+        r0 += (uint128_t) test_overflow;
+    } else {
+        ++OVERFLOW;
+        r0 += ((uint128_t)f2_19) * ((uint128_t)g3);
+    }
+    #else
+        r0 += ((uint128_t)f2_19) * ((uint128_t)g3);
+    #endif
+
+
+    #if defined TEST_OVERFLOW_BEFORE
+    if ((f3_19 < (MAX_NO_OVERFLOW)) && (g2 < (MAX_NO_OVERFLOW))) {
+        ++NO_OVERFLOW;
+         r0 += (uint128_t) (f3_19 * g2);
+    } else {
+        ++OVERFLOW;
+        r0 += ((uint128_t)f3_19) * ((uint128_t)g2);
+    }
+    #elif defined TEST_OVERFLOW_AFTER
+	if (!__builtin_umull_overflow(f3_19, g2, &test_overflow)) {
+        ++NO_OVERFLOW;
+        r0 += (uint128_t) test_overflow;
+    } else {
+        ++OVERFLOW;
+        r0 += ((uint128_t)f3_19) * ((uint128_t)g2);
+    }
+    #else
+        r0 += ((uint128_t)f3_19) * ((uint128_t)g2);
+    #endif
+
+
+    #if defined TEST_OVERFLOW_BEFORE
+    if ((f4_19 < (MAX_NO_OVERFLOW)) && (g1 < (MAX_NO_OVERFLOW))) {
+        ++NO_OVERFLOW;
+         r0 += (uint128_t) (f4_19 * g1);
+    } else {
+        ++OVERFLOW;
+        r0 += ((uint128_t)f4_19) * ((uint128_t)g1);
+    }
+    #elif defined TEST_OVERFLOW_AFTER
+	if (!__builtin_umull_overflow(f4_19, g1, &test_overflow)) {
+        ++NO_OVERFLOW;
+        r0 += (uint128_t) test_overflow;
+    } else {
+        ++OVERFLOW;
+        r0 += ((uint128_t)f4_19) * ((uint128_t)g1);
+    }
+    #else
+        r0 += ((uint128_t)f4_19) * ((uint128_t)g1);
+    #endif
 
     r1 = ((uint128_t)f0) * ((uint128_t)g1);
     r1 += ((uint128_t)f1) * ((uint128_t)g0);
@@ -403,6 +507,8 @@ fe25519_sq(fe25519 h, const fe25519 f)
     f3_19 = 19ULL * f3;
     f4_19 = 19ULL * f4;
 
+
+    //printf("How Big???: %ld, %ld, %ld, %ld, %ld\n", f0, f1_38, f2_38, f4, f3);
     r0 = ((uint128_t)f0) * ((uint128_t)f0);
     r0 += ((uint128_t)f1_38) * ((uint128_t)f4);
     r0 += ((uint128_t)f2_38) * ((uint128_t)f3);
@@ -1014,6 +1120,9 @@ int main()
         ge25519_p3_tobytes(a, &h);
         a[31] &= 0x7f;
     }
+    printf("a[31]: %d\n", a[31]);
+    printf("NO_OVERFLOW: %ld\n", NO_OVERFLOW);
+    printf("OVERFLOW: %ld\n", OVERFLOW);
     //bench_end();
 
     //BLACK_BOX(a);
