@@ -15,8 +15,22 @@ impl Imm8 {
     }
 
     pub fn to_string(&self, extend: Extension) -> String {
-        if matches!(extend, Extension::SignExtend) {
+        if matches!(extend, Extension::SignExtendQuad) {
             let extended = self.0 as i8 as i64; // Convert u8 to i8, then to i64 for sign extension
+            if extended < 10 && extended >= 0 {
+                format!("${:x}", extended)
+            } else {
+                format!("$0x{:x}", extended)
+            }
+        } else if matches!(extend, Extension::SignExtendLong) {
+            let extended = self.0 as i8 as i32; // Convert u8 to i8, then to i32 for sign extension
+            if extended < 10 && extended >= 0 {
+                format!("${:x}", extended)
+            } else {
+                format!("$0x{:x}", extended)
+            }
+        } else if matches!(extend, Extension::SignExtendWord) {
+            let extended = self.0 as i8 as i16; // Convert u8 to i8, then to i16 for sign extension
             if extended < 10 && extended >= 0 {
                 format!("${:x}", extended)
             } else {
@@ -57,8 +71,22 @@ impl Imm16 {
     }
 
     pub fn to_string(&self, extend: Extension) -> String {
-        if matches!(extend, Extension::SignExtend) {
-            let extended = self.0 as i16 as i64; // Convert u8 to i8, then to i64 for sign extension
+        if matches!(extend, Extension::SignExtendQuad) {
+            let extended = self.0 as i16 as i64; // Convert u16 to i16, then to i64 for sign extension
+            if extended < 10 && extended >= 0 {
+                format!("${:x}", extended)
+            } else {
+                format!("$0x{:x}", extended)
+            }
+        } else if matches!(extend, Extension::SignExtendLong) {
+            let extended = self.0 as i16 as i32; // Convert u16 to i16, then to i32 for sign extension
+            if extended < 10 && extended >= 0 {
+                format!("${:x}", extended)
+            } else {
+                format!("$0x{:x}", extended)
+            }
+        } else if matches!(extend, Extension::SignExtendWord) {
+            let extended = self.0 as i16; // Convert u16 to i16
             if extended < 10 && extended >= 0 {
                 format!("${:x}", extended)
             } else {
@@ -98,8 +126,15 @@ impl Imm32 {
         self.0
     }
     pub fn to_string(&self, extend: Extension) -> String {
-        if matches!(extend, Extension::SignExtend) {
+        if matches!(extend, Extension::SignExtendQuad) {
             let extended = self.0 as i32 as i64; // Convert u8 to i8, then to i64 for sign extension
+            if extended < 10 && extended >= 0 {
+                format!("${:x}", extended)
+            } else {
+                format!("$0x{:x}", extended)
+            }
+        } else if matches!(extend, Extension::SignExtendLong) {
+            let extended = self.0 as i32; // Convert u8 to i8, then to i64 for sign extension
             if extended < 10 && extended >= 0 {
                 format!("${:x}", extended)
             } else {
@@ -122,7 +157,9 @@ impl Imm32 {
 
 pub enum Extension {
     None,
-    SignExtend,
+    SignExtendQuad,
+    SignExtendLong,
+    SignExtendWord,
     ZeroExtend,
 }
 

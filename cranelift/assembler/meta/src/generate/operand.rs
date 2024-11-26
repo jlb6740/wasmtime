@@ -24,24 +24,29 @@ impl dsl::Location {
             (ax, _) => "\"%ax\"".into(),
             (eax, _) => "\"%eax\"".into(),
             (rax, _) => "\"%rax\"".into(),
-            //(imm8, _) | (imm16, _) => format!("self.{self}.to_string()"),
-            (imm8, Extension::None) | (imm16, Extension::None) => {
+            (imm8, Extension::None) | (imm16, Extension::None) | (imm32, Extension::None) => {
                 format!("self.{self}.to_string(Extension::None)")
             }
-            (imm32, Extension::None) => format!("self.{self}.to_string(Extension::None)"),
-            (imm8, Extension::SignExtend)
-            | (imm16, Extension::SignExtend)
-            | (imm32, Extension::SignExtend) => {
-                format!("self.{self}.to_string(Extension::SignExtend)")
+            (imm8, Extension::SignExtendQuad)
+            | (imm16, Extension::SignExtendQuad)
+            | (imm32, Extension::SignExtendQuad) => {
+                format!("self.{self}.to_string(Extension::SignExtendQuad)")
             }
+            (imm8, Extension::SignExtendLong)
+            | (imm16, Extension::SignExtendLong)
+            | (imm32, Extension::SignExtendLong) => {
+                format!("self.{self}.to_string(Extension::SignExtendLong)")
+            }
+            (imm8, Extension::SignExtendWord) | (imm16, Extension::SignExtendWord) => {
+                format!("self.{self}.to_string(Extension::SignExtendWord)")
+            }
+            (imm32, Extension::SignExtendWord) => unreachable!(),
             (imm8, Extension::ZeroExtend) | (imm16, Extension::ZeroExtend) => {
                 format!("self.{self}.to_string(Extension::ZeroExtend)")
             }
             (imm32, Extension::ZeroExtend) => {
                 format!("self.{self}.to_string(Extension::ZeroExtend)")
             }
-            //imm32 => format!("self.{self}.to_string(Extension::SignExtend)"),
-            //imm32 => format!("self.{self}.to_string(self.{self})"),
             (r8, _)
             | (r16, _)
             | (r32, _)

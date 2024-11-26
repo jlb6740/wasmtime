@@ -31,11 +31,29 @@ pub fn r(location: Location) -> Operand {
 }
 
 #[must_use]
-pub fn sx(location: Location) -> Operand {
+pub fn sxq(location: Location) -> Operand {
     Operand {
         location,
         mutability: Mutability::Read,
-        extension: Extension::SignExtend,
+        extension: Extension::SignExtendQuad,
+    }
+}
+
+#[must_use]
+pub fn sxl(location: Location) -> Operand {
+    Operand {
+        location,
+        mutability: Mutability::Read,
+        extension: Extension::SignExtendLong,
+    }
+}
+
+#[must_use]
+pub fn sxw(location: Location) -> Operand {
+    Operand {
+        location,
+        mutability: Mutability::Read,
+        extension: Extension::SignExtendWord,
     }
 }
 
@@ -242,7 +260,9 @@ impl core::fmt::Display for Mutability {
 #[derive(Clone, Copy, Debug)]
 pub enum Extension {
     None,
-    SignExtend,
+    SignExtendQuad,
+    SignExtendLong,
+    SignExtendWord,
     ZeroExtend,
 }
 
@@ -256,7 +276,9 @@ impl core::fmt::Display for Extension {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Extension::None => write!(f, "none"),
-            Extension::SignExtend => write!(f, "sx"),
+            Extension::SignExtendQuad => write!(f, "sxq"),
+            Extension::SignExtendLong => write!(f, "sxl"),
+            Extension::SignExtendWord => write!(f, "sxw"),
             Extension::ZeroExtend => write!(f, "zx"),
         }
     }
