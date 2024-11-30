@@ -64,7 +64,7 @@ fn generate_inst_display_impl(f: &mut Formatter, insts: &[dsl::Inst]) {
 fn generate_inst_encode_impl(f: &mut Formatter, insts: &[dsl::Inst]) {
     fmtln!(f, "impl Inst {{");
     f.indent(|f| {
-        fmtln!(f, "pub fn encode(&self, b: &mut impl CodeSink, o: &impl OffsetTable) {{");
+        fmtln!(f, "pub fn encode(&self, b: &mut impl CodeSink, o: &impl KnownOffsetTable) {{");
         f.indent(|f| {
             fmtln!(f, "match self {{");
             f.indent_push();

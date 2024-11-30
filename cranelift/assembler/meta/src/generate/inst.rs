@@ -62,14 +62,17 @@ impl dsl::Inst {
         fmtln!(f, "}}");
     }
 
-    /// `fn encode(&self, buf: &mut impl CodeSink, off: &impl OffsetTable) { ... }`
+    /// `fn encode(&self, buf: &mut impl CodeSink, off: &impl KnownOffsetTable) { ... }`
     pub fn generate_encode_function(&self, f: &mut Formatter) {
         let off = if self.format.uses_memory().is_some() {
             "off"
         } else {
             "_"
         };
-        fmtln!(f, "pub fn encode(&self, buf: &mut impl CodeSink, {off}: &impl OffsetTable) {{");
+        fmtln!(
+            f,
+            "pub fn encode(&self, buf: &mut impl CodeSink, {off}: &impl KnownOffsetTable) {{"
+        );
         f.indent_push();
 
         // Emit trap.
