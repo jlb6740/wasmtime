@@ -88,7 +88,7 @@ impl dsl::Inst {
     pub fn generate_variant_encode(&self, f: &mut Formatter) {
         let variant_name = self.struct_name();
         let immediate_name = self.immediate_name();
-        fmtln!(f, "Self::{variant_name}{immediate_name}(i) => i.encode(b),");
+        fmtln!(f, "Self::{variant_name}{immediate_name}(i) => i.encode(b, o),");
     }
 
     /// `impl <inst> { ... }`
