@@ -181,23 +181,9 @@ impl dsl::Inst {
         fmtln!(f, "fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {{");
 
         f.indent_push();
-        // let mut i = 0;
-        // for op in self.format.locations() {
-        //     let extend = self.format.operands[i].extension;
-        //     fmtln!(f, "// Operand: {op} Extend: {extend}");
-        //let to_string = op.generate_to_string();
-        //fmtln!(f, "//let {op} = {to_string};");
-        //     i += 1;
-        // }
-
-        //let mut i = 0;
-        //for op in &self.format.operands {
-        //    let to_string = op.generate_to_string();
-        // }
         let mut i = 0;
         for op in self.format.locations() {
             let extension = self.format.operands[i].extension;
-            fmtln!(f, "// Iter: {i} Extend: {extension}");
             let to_string = op.generate_to_string(extension);
             fmtln!(f, "let {op} = {to_string};");
             i += 1;

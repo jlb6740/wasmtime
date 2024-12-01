@@ -111,13 +111,6 @@ impl core::fmt::Display for Operand {
         let Self { location, mutability, extension } = self;
         write!(f, "{location}")?;
         let has_default_mutability = matches!(mutability, Mutability::Read);
-        //let has_default_extension = matches!(extension, Extension::None);
-        //match (has_default_mutability, has_default_extension) {
-        //(true, true) => {}
-        //(true, false) => write!(f, "[{extension}]")?,
-        //(false, true) => write!(f, "[{mutability}]")?,
-        //(false, false) => write!(f, "[{mutability},{extension}]")?,
-        //}
         match has_default_mutability {
             true => write!(f, "[{extension}]")?,
             false => write!(f, "[{mutability},{extension}]")?,
