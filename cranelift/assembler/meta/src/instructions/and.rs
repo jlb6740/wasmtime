@@ -1,5 +1,5 @@
 use crate::dsl::{
-    fmt, inst, r, rex, rw, sxl, sxq, sxw, Features::*, Inst, LegacyPrefixes::*, Location::*,
+    fmt, inst, r, rex, rw, sxl, sxq, Features::*, Inst, LegacyPrefixes::*, Location::*,
 };
 
 pub fn list() -> Vec<Inst> {
