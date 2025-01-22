@@ -8,9 +8,9 @@ mod encoding;
 mod features;
 pub mod format;
 
-pub use encoding::{rex, vex, Encoding, LegacyPrefixes, Rex};
+pub use encoding::{rex, vex, Encoding, LegacyPrefixes, Rex, VexLength, VexMMMMM, VexPP};
 pub use features::Features;
-pub use format::{fmt, r, rw, sxl, sxq, sxw};
+pub use format::{fmt, r, rw, sxl, sxq, sxw, w};
 pub use format::{Extension, Format, Location, Mutability, Operand, OperandKind};
 
 /// Abbreviated constructor for an instruction.

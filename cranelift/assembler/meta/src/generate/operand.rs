@@ -12,6 +12,8 @@ impl dsl::Location {
             imm32 => Some("Imm32"),
             r8 | r16 | r32 | r64 => Some("Gpr"),
             rm8 | rm16 | rm32 | rm64 => Some("GprMem"),
+            xmm | ymm | zmm => Some("Vec"),
+            xmmm | ymmm | zmmm => Some("VecMem"),
         }
     }
 
@@ -32,6 +34,7 @@ impl dsl::Location {
                 Some(size) => format!("self.{self}.to_string({size})"),
                 None => unreachable!(),
             },
+            xmm | ymm | zmm | xmmm | ymmm | zmmm => format!("self.{self}.to_string()"),
         }
     }
 
@@ -45,6 +48,9 @@ impl dsl::Location {
             r16 | rm16 => Some("Size::Word"),
             r32 | rm32 => Some("Size::Doubleword"),
             r64 | rm64 => Some("Size::Quadword"),
+            xmm | xmmm => Some("Size::Octoword"),
+            ymm | ymmm => Some("Size::DoubleOctoword"),
+            zmm | zmmm => Some("Size::QuadOctoword"),
         }
     }
 
@@ -54,7 +60,8 @@ impl dsl::Location {
         use dsl::Location::*;
         match self {
             al | ax | eax | rax => Some("Gpr::new(reg::ENC_RAX.into())"),
-            imm8 | imm16 | imm32 | r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 => None,
+            imm8 | imm16 | imm32 | r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 | xmm | ymm
+            | zmm | xmmm | ymmm | zmmm => None,
         }
     }
 }
@@ -65,6 +72,7 @@ impl dsl::Mutability {
         match self {
             dsl::Mutability::Read => "read",
             dsl::Mutability::ReadWrite => "read_write",
+            &dsl::Mutability::Write => "write",
         }
     }
 }
