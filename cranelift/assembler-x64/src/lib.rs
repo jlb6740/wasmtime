@@ -40,15 +40,15 @@
 #![allow(non_camel_case_types)]
 
 mod api;
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz;
 mod imm;
 pub mod inst;
 pub mod isle;
 mod mem;
 mod reg;
 mod rex;
-
-#[cfg(any(test, feature = "fuzz"))]
-pub mod fuzz;
+mod vex;
 
 /// An assembly instruction; contains all instructions known to the assembler.
 ///

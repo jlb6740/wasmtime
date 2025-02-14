@@ -24,6 +24,16 @@ pub fn fmt(name: impl Into<String>, operands: impl IntoIterator<Item = impl Into
     }
 }
 
+/// An abbreviated constructor for a "write" operand.
+#[must_use]
+pub fn w(location: Location) -> Operand {
+    Operand {
+        location,
+        mutability: Mutability::Write,
+        extension: Extension::None,
+    }
+}
+
 /// An abbreviated constructor for a "read-write" operand.
 ///
 /// # Panics
@@ -214,6 +224,14 @@ pub enum Location {
     rm16,
     rm32,
     rm64,
+
+    xmm,
+    ymm,
+    zmm,
+
+    xmmm,
+    ymmm,
+    zmmm,
 }
 
 impl Location {
@@ -226,6 +244,10 @@ impl Location {
             ax | imm16 | r16 | rm16 => 16,
             eax | imm32 | r32 | rm32 => 32,
             rax | r64 | rm64 => 64,
+            xmm | xmmm => 128,
+            //ymm | ymmm => 256,
+            //zmm | zmmm => 512,
+            _ => todo!(),
         }
     }
 
@@ -240,8 +262,8 @@ impl Location {
     pub fn uses_memory(&self) -> bool {
         use Location::*;
         match self {
-            al | ax | eax | rax | imm8 | imm16 | imm32 | r8 | r16 | r32 | r64 => false,
-            rm8 | rm16 | rm32 | rm64 => true,
+            al | ax | eax | rax | imm8 | imm16 | imm32 | r8 | r16 | r32 | r64 | xmm | ymm | zmm => false,
+            rm8 | rm16 | rm32 | rm64 | xmmm | ymmm | zmmm => true,
         }
     }
 
@@ -252,7 +274,7 @@ impl Location {
         use Location::*;
         match self {
             al | ax | eax | rax | imm8 | imm16 | imm32 => false,
-            r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 => true,
+            r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 | xmm | ymm | zmm | xmmm | ymmm | zmmm => true,
         }
     }
 
@@ -263,8 +285,18 @@ impl Location {
         match self {
             al | ax | eax | rax => OperandKind::FixedReg(*self),
             imm8 | imm16 | imm32 => OperandKind::Imm(*self),
-            r8 | r16 | r32 | r64 => OperandKind::Reg(*self),
-            rm8 | rm16 | rm32 | rm64 => OperandKind::RegMem(*self),
+            r8 | r16 | r32 | r64 | xmm | ymm | zmm => OperandKind::Reg(*self),
+            rm8 | rm16 | rm32 | rm64 | xmmm | ymmm | zmmm => OperandKind::RegMem(*self),
+        }
+    }
+
+    /// Convert the location to an [`RegKind`].
+    pub fn reg_kind(&self) -> RegKind {
+        use Location::*;
+        match self {
+            al | ax | eax | rax | r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 => RegKind::Gpr(*self),
+            xmm | ymm | zmm | xmmm | ymmm | zmmm => RegKind::Vec(*self),
+            imm8 | imm16 | imm32 => RegKind::Mem(*self),
         }
     }
 }
@@ -291,6 +323,14 @@ impl core::fmt::Display for Location {
             rm16 => write!(f, "rm16"),
             rm32 => write!(f, "rm32"),
             rm64 => write!(f, "rm64"),
+
+            xmm => write!(f, "xmm"),
+            ymm => write!(f, "ymm"),
+            zmm => write!(f, "zmm"),
+
+            xmmm => write!(f, "xmmm"),
+            ymmm => write!(f, "ymmm"),
+            zmmm => write!(f, "zmmm"),
         }
     }
 }
@@ -309,6 +349,12 @@ pub enum OperandKind {
     RegMem(Location),
 }
 
+pub enum RegKind {
+    Gpr(Location),
+    Vec(Location),
+    Mem(Location),
+}
+
 /// x64 operands can be mutable or not.
 ///
 /// ```
@@ -320,6 +366,7 @@ pub enum OperandKind {
 pub enum Mutability {
     Read,
     ReadWrite,
+    Write,
 }
 
 impl Default for Mutability {
@@ -333,6 +380,7 @@ impl core::fmt::Display for Mutability {
         match self {
             Self::Read => write!(f, "r"),
             Self::ReadWrite => write!(f, "rw"),
+            Self::Write => write!(f, "w"),
         }
     }
 }

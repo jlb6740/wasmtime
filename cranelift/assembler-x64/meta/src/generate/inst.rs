@@ -18,10 +18,12 @@ impl dsl::Inst {
         }
         fmtln!(f, "pub struct {struct_name} {where_clause} {{");
         f.indent(|f| {
+            let mut index = 0;
             for k in &self.format.operands {
                 if let Some(ty) = k.generate_type() {
                     let loc = k.location;
-                    fmtln!(f, "pub {loc}: {ty},");
+                    fmtln!(f, "pub {loc}_{index}: {ty},");
+                    index += 1;
                 }
             }
         });
@@ -70,18 +72,45 @@ impl dsl::Inst {
 
     // `fn new(<params>) -> Self { ... }`
     pub fn generate_new_function(&self, f: &mut Formatter) {
+        /* let params = comma_join(
+            self.format
+                .operands
+                .iter()
+                .filter_map(|o| o.generate_type().map(|t| format!("{}_: {}", o.location, t))),
+        );*/
+
+        /*
+                let args = comma_join(
+                    self.format
+                        .operands
+                        .iter()
+                        .filter(|o| !matches!(o.location.kind(), dsl::OperandKind::FixedReg(_)))
+                        .map(|o| o.location.to_string()),
+                );
+        */
+
         let params = comma_join(
             self.format
                 .operands
                 .iter()
-                .filter_map(|o| o.generate_type().map(|t| format!("{}: {}", o.location, t))),
+                .filter(|o| o.generate_type().is_some())
+                .enumerate()
+                .map(|(index, o)| {
+                    format!(
+                        "{}: {}",
+                        vec![o.location.to_string(), index.to_string()].join("_"),
+                        o.generate_type().unwrap()
+                    )
+                }),
         );
+
         let args = comma_join(
             self.format
                 .operands
                 .iter()
                 .filter(|o| !matches!(o.location.kind(), dsl::OperandKind::FixedReg(_)))
-                .map(|o| o.location.to_string()),
+                .enumerate()
+                .map(|(index, o)| vec![o.location.to_string(), index.to_string()].join("_")),
         );
 
         fmtln!(f, "#[must_use]");
@@ -119,7 +148,8 @@ impl dsl::Inst {
 
         match &self.encoding {
             dsl::Encoding::Rex(rex) => self.format.generate_rex_encoding(f, rex),
-            dsl::Encoding::Vex(_) => todo!(),
+            dsl::Encoding::Vex(vex) => self.format.generate_vex_encoding(f, vex),
+            //dsl::Encoding::Vex() => todo!(),
         }
 
         f.indent_pop();
@@ -228,14 +258,14 @@ impl dsl::Inst {
     /// # Panics
     ///
     /// This function panics if the instruction has no operands.
-    pub fn generate_isle_macro(&self, f: &mut Formatter, read_ty: &str, read_write_ty: &str) {
+    pub fn generate_isle_macro(&self, f: &mut Formatter, read_ty: &str, read_write_ty: &str, write_ty: &str) {
         use dsl::OperandKind::*;
         let struct_name = self.name();
         let operands = self
             .format
             .operands
             .iter()
-            .filter_map(|o| Some((o.location, o.generate_mut_ty(read_ty, read_write_ty)?)))
+            .filter_map(|o| Some((o.location, o.generate_mut_ty(read_ty, read_write_ty, write_ty)?)))
             .collect::<Vec<_>>();
         let ret_ty = match self.format.operands.first().unwrap().location.kind() {
             Imm(_) => unreachable!(),

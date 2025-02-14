@@ -28,8 +28,21 @@ pub fn rex(opcode: u8) -> Rex {
 
 /// An abbreviated constructor for VEX-encoded instructions.
 #[must_use]
-pub fn vex() -> Vex {
-    Vex {}
+pub fn vex(opcode: u8) -> Vex {
+    Vex {
+        opcode,
+        w: false,
+        r: false,
+        digit: 0,
+        imm: Imm::None,
+        is4: false,
+        size_e: 0,
+        wig: false,
+        rxb: 0,
+        length: VexLength::_128,
+        mmmmm: VexMMMMM::_OF,
+        pp: VexPP::None,
+    }
 }
 
 /// Enumerate the ways x64 encodes instructions.
@@ -44,7 +57,7 @@ impl Encoding {
     pub fn validate(&self, operands: &[Operand]) {
         match self {
             Encoding::Rex(rex) => rex.validate(operands),
-            Encoding::Vex(vex) => vex.validate(),
+            Encoding::Vex(vex) => vex.validate(operands),
         }
     }
 }
@@ -53,7 +66,7 @@ impl fmt::Display for Encoding {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Encoding::Rex(rex) => write!(f, "{rex}"),
-            Encoding::Vex(_vex) => todo!(),
+            Encoding::Vex(vex) => write!(f, "{vex}"),
         }
     }
 }
@@ -313,10 +326,155 @@ impl fmt::Display for Imm {
     }
 }
 
-pub struct Vex {}
+pub struct Vex {
+    /// Any legacy prefixes that should be included with the instruction.
+    //pub prefix: LegacyPrefixes,
+
+    ///VEX bit field:  Value of false (0) means length is scalar or 128 bits while true (1) means 256 bits.
+    pub length: VexLength,
+
+    /// VEX bit field: Opcode extension providing equivalent functionality of a SIMD prefix.
+    pub pp: VexPP,
+
+    pub mmmmm: VexMMMMM,
+
+    /// TODO: Maybe can delete. Placeholder for OF, OF3A, and OF3B
+    pub size_e: u8,
+
+    pub wig: bool,
+
+    pub is4: bool,
+
+    pub rxb: u8,
+
+    /// Vector Length Encoding (VEX) prefix.
+    //pub VEX: u16,
+
+    /// The opcode of the instruction.
+    pub opcode: u8,
+    /// Indicates setting the VEX.W bit.
+    ///
+    /// From the specification: "Indicates the use of a REX prefix that affects
+    /// operand size or instruction semantics. The ordering of the REX prefix
+    /// and other optional/mandatory instruction prefixes are discussed Chapter
+    /// 2. Note that REX prefixes that promote legacy instructions to 64-bit
+    /// behavior are not listed explicitly in the opcode column."
+    pub w: bool,
+    /// From the specification: "indicates that the ModR/M byte of the
+    /// instruction contains a register operand and an r/m operand."
+    pub r: bool,
+    /// From the specification: "a digit between 0 and 7 indicates that the
+    /// ModR/M byte of the instruction uses only the r/m (register or memory)
+    /// operand. The reg field contains the digit that provides an extension to
+    /// the instruction's opcode."
+    pub digit: u8,
+    /// The number of bits used as an immediate operand to the instruction.
+    ///
+    /// From the specification: "a 1-byte (ib), 2-byte (iw), 4-byte (id) or
+    /// 8-byte (io) immediate operand to the instruction that follows the
+    /// opcode, ModR/M bytes or scale-indexing bytes. The opcode determines if
+    /// the operand is a signed value. All words, doublewords, and quadwords are
+    /// given with the low-order byte first."
+    pub imm: Imm,
+}
 
 impl Vex {
-    fn validate(&self) {
-        todo!()
+    pub fn length(self, length: VexLength) -> Self {
+        Self { length, ..self }
     }
+    pub fn pp(self, pp: VexPP) -> Self {
+        Self { pp, ..self }
+    }
+    pub fn mmmmm(self, mmmmm: VexMMMMM) -> Self {
+        Self { mmmmm, ..self }
+    }
+    fn validate(&self, _operands: &[Operand]) {
+        /*
+        +        assert!(self.digit < 8);
+        +        assert!(!(self.r && self.digit > 0));
+        +        assert!(!(self.r && self.imm != Imm::None));
+        +        assert!(
+        +            !(self.w && (self.prefixes.contains_66())),
+        +            "though valid, if REX.W is set then the 66 prefix is ignored--avoid encoding this"
+        +        );
+        +        // assert!(self.prefixes.contains_66() && operands.iter().all(|&op| op == 16));
+        +
+        +        if let Some(OperandKind::Imm(op)) = operands
+        +            .iter()
+        +            .map(|o| o.location.kind())
+        +            .find(|k| matches!(k, OperandKind::Imm(_)))
+        +        {
+        +            assert_eq!(op.bits(), self.imm.bits());
+        +        }
+        +        */
+    }
+}
+
+impl From<Vex> for Encoding {
+    fn from(vex: Vex) -> Encoding {
+        Encoding::Vex(vex)
+    }
+}
+impl fmt::Display for Vex {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "VEX")?;
+        /*    match self.prefixes {
+            LegacyPrefixes::NoPrefix => {}
+            LegacyPrefixes::_66 => write!(f, "0x66 + ")?,
+            LegacyPrefixes::_F0 => write!(f, "0xF0 + ")?,
+            LegacyPrefixes::_66F0 => write!(f, "0x66F0 + ")?,
+            LegacyPrefixes::_F2 => write!(f, "0xF2 + ")?,
+            LegacyPrefixes::_F3 => write!(f, "0xF3 + ")?,
+            LegacyPrefixes::_66F3 => write!(f, "0x66F3 + ")?,
+        }
+        if self.w {
+            write!(f, "REX.W + ")?;
+        }
+        */
+        match self.length {
+            VexLength::_128 => write!(f, ".128")?,
+            VexLength::_256 => write!(f, ".256")?,
+        }
+        write!(f, " {:#04x}", self.opcode)?;
+
+        /*
+        if self.r {
+            write!(f, " /r")?;
+        }
+        if self.digit > 0 {
+            write!(f, " /{}", self.digit)?;
+        }
+        if self.imm != Imm::None {
+            write!(f, " {}", self.imm)?;
+        }*/
+
+        Ok(())
+    }
+}
+
+#[derive(PartialEq)]
+pub enum VexLength {
+    /// Operand size override -- here, denoting "16-bit operation".
+    _128,
+    /// The lock prefix.
+    _256,
+}
+
+#[derive(PartialEq)]
+pub enum VexPP {
+    None,
+    /// Operand size override -- here, denoting "16-bit operation".
+    _66,
+    /// The lock prefix.
+    _F3,
+    _F2,
+}
+
+#[derive(PartialEq)]
+pub enum VexMMMMM {
+    _OF,
+    /// Operand size override -- here, denoting "16-bit operation".
+    _OF3A,
+    /// The lock prefix.
+    _OF3B,
 }

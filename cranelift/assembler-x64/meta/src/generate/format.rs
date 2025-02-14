@@ -35,6 +35,14 @@ impl dsl::Format {
         self.generate_immediate(f);
     }
 
+    pub fn generate_vex_encoding(&self, f: &mut Formatter, vex: &dsl::Vex) {
+        //self.generate_legacy_prefix(f, vex);
+        //self.generate_rex_prefix(f, vex);
+        self.generate_vex_opcode(f, vex);
+        //self.generate_modrm_byte(f, vex);
+        //self.generate_immediate(f);
+    }
+
     /// `buf.put1(...);`
     #[allow(clippy::unused_self)]
     fn generate_legacy_prefix(&self, f: &mut Formatter, rex: &dsl::Rex) {
@@ -65,6 +73,13 @@ impl dsl::Format {
         f.empty_line();
         f.comment("Emit opcode.");
         fmtln!(f, "buf.put1(0x{:x});", rex.opcode);
+    }
+
+    #[allow(clippy::unused_self)]
+    fn generate_vex_opcode(&self, f: &mut Formatter, vex: &dsl::Vex) {
+        f.empty_line();
+        f.comment("Emit opcode.");
+        fmtln!(f, "buf.put1(0x{:x});", vex.opcode);
     }
 
     fn generate_rex_prefix(&self, f: &mut Formatter, rex: &dsl::Rex) {

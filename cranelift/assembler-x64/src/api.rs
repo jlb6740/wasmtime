@@ -109,6 +109,12 @@ pub trait Registers {
 
     /// An x64 general purpose register that may be read and written.
     type ReadWriteGpr: AsReg;
+
+    /// An x64 vector register (xmm, ymm, zmm) that may be read.
+    type ReadVec: AsReg;
+
+    /// An x64 vector register (xmm, ymm, zmm) that may be written.
+    type WriteVec: AsReg;
 }
 
 /// Describe how to interact with an external register type.
