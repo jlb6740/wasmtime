@@ -122,6 +122,13 @@ impl Format {
         self.locations().copied().find(Location::uses_memory)
     }
 
+    /// Return the location of the operand that uses memory, if any; return
+    /// `None` otherwise.
+    pub fn uses_memory_at_index(&self) -> Option<Location> {
+        debug_assert!(self.locations().copied().filter(Location::uses_memory).count() <= 1);
+        self.locations().copied().find(Location::uses_memory)
+    }
+
     /// Return `true` if any of the operands accepts a variable register (i.e.,
     /// not a fixed register, immediate); return `false` otherwise.
     #[must_use]

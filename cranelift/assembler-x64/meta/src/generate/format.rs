@@ -1,6 +1,8 @@
 //! Generate format-related Rust code; this also includes generation of encoding
 //! Rust code.
 
+use core::fmt;
+
 use super::{fmtln, Formatter};
 use crate::dsl;
 
@@ -176,13 +178,35 @@ impl dsl::Format {
         use dsl::OperandKind::Imm;
         match self.operands_by_kind().as_slice() {
             [_, Imm(imm)] => {
+                let mut position = 1;
+                self.operands
+                    .iter()
+                    .filter(|o| o.generate_type().is_some())
+                    .for_each(|o| {
+                        if matches!(o.location.kind(), dsl::OperandKind::Imm(_)) {
+                            f.comment("We Matched");
+                            return;
+                        };
+                        f.comment("Should we be here?");
+                        position += 1
+                    });
                 f.empty_line();
                 f.comment("Emit immediate.");
                 fmtln!(f, "let bytes = {};", imm.bytes());
                 if imm.bits() == 32 {
-                    fmtln!(f, "let value = self.{imm}.value();");
+                    //fmtln!(f, "let value = self.{imm}.value();");
+                    fmtln!(
+                        f,
+                        "let value = self.{}.value();",
+                        vec![imm.to_string(), position.to_string()].join("_")
+                    );
                 } else {
-                    fmtln!(f, "let value = u32::from(self.{imm}.value());");
+                    //fmtln!(f, "let value = u32::from(self.{imm}.value());");
+                    fmtln!(
+                        f,
+                        "let value = u32::from(self.{}.value());",
+                        vec![imm.to_string(), position.to_string()].join("_")
+                    );
                 };
                 fmtln!(f, "emit_simm(buf, bytes, value);");
             }

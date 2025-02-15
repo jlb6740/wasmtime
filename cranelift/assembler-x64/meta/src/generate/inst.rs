@@ -18,10 +18,20 @@ impl dsl::Inst {
         }
         fmtln!(f, "pub struct {struct_name} {where_clause} {{");
         f.indent(|f| {
+            let mut index = 0;
             for k in &self.format.operands {
                 if let Some(ty) = k.generate_type() {
                     let loc = k.location;
-                    fmtln!(f, "pub {loc}: {ty},");
+                    /*
+                    if !matches!(loc.kind(), dsl::OperandKind::Imm(_)) {
+                        fmtln!(f, "pub {loc}_{index}: {ty},");
+                        index += 1;
+                    } else {
+                        fmtln!(f, "pub {loc}: {ty},");
+                    }
+                    */
+                    index += 1;
+                    fmtln!(f, "pub {loc}_{index}: {ty},");
                 }
             }
         });
@@ -70,6 +80,7 @@ impl dsl::Inst {
 
     // `fn new(<params>) -> Self { ... }`
     pub fn generate_new_function(&self, f: &mut Formatter) {
+        /*
         let params = comma_join(
             self.format
                 .operands
@@ -82,6 +93,79 @@ impl dsl::Inst {
                 .iter()
                 .filter(|o| !matches!(o.location.kind(), dsl::OperandKind::FixedReg(_)))
                 .map(|o| o.location.to_string()),
+        ); */
+
+        // Skips if operandkind is imm
+        /*
+                let mut index = 0;
+                let params = comma_join(
+                    self.format
+                        .operands
+                        .iter()
+                        .filter(|o| o.generate_type().is_some())
+                        .enumerate()
+                        .map(|(_index, o)| {
+                            if !matches!(o.location.kind(), dsl::OperandKind::Imm(_)) {
+                                index += 1;
+                                format!(
+                                    "{}: {}",
+                                    vec![o.location.to_string(), index.to_string()].join("_"),
+                                    o.generate_type().unwrap()
+                                )
+                            } else {
+                                format!("{}: {}", o.location.to_string(), o.generate_type().unwrap())
+                            }
+                        }),
+                );
+
+                let mut index = 0;
+                let args = comma_join(
+                    self.format
+                        .operands
+                        .iter()
+                        .filter(|o| !matches!(o.location.kind(), dsl::OperandKind::FixedReg(_)))
+                        .enumerate()
+                        .map(|(_index, o)| {
+                            if !matches!(o.location.kind(), dsl::OperandKind::Imm(_)) {
+                                index += 1;
+                                vec![o.location.to_string(), index.to_string()].join("_")
+                            } else {
+                                o.location.to_string()
+                            }
+                        }),
+                );
+
+        */
+
+        // Do not skip if operand kind is immediate
+        let mut index = 0;
+        let params = comma_join(
+            self.format
+                .operands
+                .iter()
+                .filter(|o| o.generate_type().is_some())
+                .enumerate()
+                .map(|(_index, o)| {
+                    index += 1;
+                    format!(
+                        "{}: {}",
+                        vec![o.location.to_string(), index.to_string()].join("_"),
+                        o.generate_type().unwrap()
+                    )
+                }),
+        );
+
+        let mut index = 0;
+        let args = comma_join(
+            self.format
+                .operands
+                .iter()
+                .filter(|o| !matches!(o.location.kind(), dsl::OperandKind::FixedReg(_)))
+                .enumerate()
+                .map(|(_index, o)| {
+                    index += 1;
+                    vec![o.location.to_string(), index.to_string()].join("_")
+                }),
         );
 
         fmtln!(f, "#[must_use]");
@@ -103,7 +187,7 @@ impl dsl::Inst {
         f.indent_push();
 
         // Emit trap.
-        if let Some(op) = self.format.uses_memory() {
+        if let Some(op) = self.format.uses_memory_at_index() {
             f.empty_line();
             f.comment("Emit trap.");
             fmtln!(f, "if let GprMem::Mem({op}) = &self.{op} {{");
@@ -194,10 +278,20 @@ impl dsl::Inst {
         f.indent(|f| {
             fmtln!(f, "fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {{");
             f.indent(|f| {
+                let mut position = 1;
                 for op in &self.format.operands {
                     let location = op.location;
                     let to_string = location.generate_to_string(op.extension);
+                    /*   if let Some(ty) = op.generate_type() {
+                        fmtln!(
+                            f,
+                            "let {} = {to_string};",
+                            vec![location.to_string(), position.to_string()].join("_")
+                        );
+                        position += 1;
+                    } else { */
                     fmtln!(f, "let {location} = {to_string};");
+                    // }
                 }
                 let inst_name = &self.mnemonic;
                 let ordered_ops = self.format.generate_att_style_operands();
