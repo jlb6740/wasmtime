@@ -282,3 +282,22 @@ pub fn emit_modrm_sib_disp<R: AsReg>(
         }
     }
 }
+
+/// A general-purpose register or memory operand.
+#[derive(Clone, Debug)]
+#[cfg_attr(any(test, feature = "fuzz"), derive(arbitrary::Arbitrary))]
+#[allow(clippy::module_name_repetitions)]
+pub enum VecMem<R: AsReg, M: AsReg> {
+    Vec(R),
+    Mem(Amode<M>),
+}
+
+impl<R: AsReg, M: AsReg> VecMem<R, M> {
+    /// Pretty-print the operand.
+    pub fn to_string(&self, size: Size) -> String {
+        match self {
+            VecMem::Vec(vec) => reg::enc::to_string(vec.enc(), size).to_owned(),
+            VecMem::Mem(amode) => amode.to_string(),
+        }
+    }
+}

@@ -13,7 +13,7 @@ impl dsl::Operand {
             }
             (Reg(_), Vec(_)) => Some(format!("Vec<R::{}Vec>", self.mutability.generate_type())),
             (RegMem(_), Vec(_)) => {
-                Some(format!("Vec<R::{}Vec, R::ReadVec>", self.mutability.generate_type()))
+                Some(format!("VecMem<R::{}Vec, R::ReadVec>", self.mutability.generate_type()))
             }
             _ => None,
         }
@@ -53,8 +53,8 @@ impl dsl::Location {
             imm32 => Some("Imm32".into()),
             r8 | r16 | r32 | r64 => Some(format!("Gpr{generic}")),
             rm8 | rm16 | rm32 | rm64 => Some(format!("GprMem{generic}")),
-            xmm | ymm | zmm => Some(format!("Vec{generic}")),
-            xmmm | ymmm | zmmm => Some(format!("VecMem{generic}")),
+            xmm1 | xmm2 | ymm1 | ymm2 => Some(format!("Vec{generic}")),
+            xmm3m128 | ymm3m256 => Some(format!("VecMem{generic}")),
         }
     }
 
@@ -75,7 +75,10 @@ impl dsl::Location {
                 Some(size) => format!("self.{self}.to_string({size})"),
                 None => unreachable!(),
             },
-            xmm | ymm | zmm | xmmm | ymmm | zmmm => format!("self.{self}.to_string()"),
+            xmm1 | xmm2 | xmm3m128 | ymm1 | ymm2 | ymm3m256 => match self.generate_size() {
+                Some(size) => format!("self.{self}.to_string({size})"),
+                None => unreachable!(),
+            },
         }
     }
 
@@ -89,9 +92,8 @@ impl dsl::Location {
             r16 | rm16 => Some("Size::Word"),
             r32 | rm32 => Some("Size::Doubleword"),
             r64 | rm64 => Some("Size::Quadword"),
-            xmm | xmmm => Some("Size::Octoword"),
-            ymm | ymmm => Some("Size::DoubleOctoword"),
-            zmm | zmmm => Some("Size::QuadOctoword"),
+            xmm1 | xmm2 | xmm3m128 => Some("Size::Octoword"),
+            ymm1 | ymm2 | ymm3m256 => Some("Size::DoubleOctoword"),
         }
     }
 
@@ -101,8 +103,8 @@ impl dsl::Location {
         use dsl::Location::*;
         match self {
             al | ax | eax | rax => Some("reg::enc::RAX"),
-            imm8 | imm16 | imm32 | r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 | xmm | ymm | zmm
-            | xmmm | ymmm | zmmm => None,
+            imm8 | imm16 | imm32 | r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 | xmm1 | xmm2
+            | xmm3m128 | ymm1 | ymm2 | ymm3m256 => None,
         }
     }
 }

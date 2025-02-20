@@ -1,5 +1,6 @@
 use super::{fmtln, generate_derive, generate_derive_arbitrary_bounds, Formatter};
 use crate::dsl;
+use crate::dsl::format::RegKind;
 
 impl dsl::Inst {
     /// `struct <inst> { <op>: Reg, <op>: Reg, ... }`
@@ -18,12 +19,13 @@ impl dsl::Inst {
         }
         fmtln!(f, "pub struct {struct_name} {where_clause} {{");
         f.indent(|f| {
-            let mut index = 0;
+            //let mut index = 0;
             for k in &self.format.operands {
                 if let Some(ty) = k.generate_type() {
                     let loc = k.location;
-                    fmtln!(f, "pub {loc}_{index}: {ty},");
-                    index += 1;
+                    fmtln!(f, "pub {loc}: {ty},");
+                    //fmtln!(f, "pub {loc}_{index}: {ty},");
+                    //index += 1;
                 }
             }
         });
@@ -72,36 +74,11 @@ impl dsl::Inst {
 
     // `fn new(<params>) -> Self { ... }`
     pub fn generate_new_function(&self, f: &mut Formatter) {
-        /* let params = comma_join(
-            self.format
-                .operands
-                .iter()
-                .filter_map(|o| o.generate_type().map(|t| format!("{}_: {}", o.location, t))),
-        );*/
-
-        /*
-                let args = comma_join(
-                    self.format
-                        .operands
-                        .iter()
-                        .filter(|o| !matches!(o.location.kind(), dsl::OperandKind::FixedReg(_)))
-                        .map(|o| o.location.to_string()),
-                );
-        */
-
         let params = comma_join(
             self.format
                 .operands
                 .iter()
-                .filter(|o| o.generate_type().is_some())
-                .enumerate()
-                .map(|(index, o)| {
-                    format!(
-                        "{}: {}",
-                        vec![o.location.to_string(), index.to_string()].join("_"),
-                        o.generate_type().unwrap()
-                    )
-                }),
+                .filter_map(|o| o.generate_type().map(|t| format!("{}: {}", o.location, t))),
         );
 
         let args = comma_join(
@@ -109,10 +86,34 @@ impl dsl::Inst {
                 .operands
                 .iter()
                 .filter(|o| !matches!(o.location.kind(), dsl::OperandKind::FixedReg(_)))
-                .enumerate()
-                .map(|(index, o)| vec![o.location.to_string(), index.to_string()].join("_")),
+                .map(|o| o.location.to_string()),
         );
 
+        /*
+                let params = comma_join(
+                    self.format
+                        .operands
+                        .iter()
+                        .filter(|o| o.generate_type().is_some())
+                        .enumerate()
+                        .map(|(index, o)| {
+                            format!(
+                                "{}: {}",
+                                vec![o.location.to_string(), index.to_string()].join("_"),
+                                o.generate_type().unwrap()
+                            )
+                        }),
+                );
+
+                let args = comma_join(
+                    self.format
+                        .operands
+                        .iter()
+                        .filter(|o| !matches!(o.location.kind(), dsl::OperandKind::FixedReg(_)))
+                        .enumerate()
+                        .map(|(index, o)| vec![o.location.to_string(), index.to_string()].join("_")),
+                );
+        */
         fmtln!(f, "#[must_use]");
         fmtln!(f, "pub fn new({params}) -> Self {{");
         f.indent(|f| {
@@ -135,7 +136,12 @@ impl dsl::Inst {
         if let Some(op) = self.format.uses_memory() {
             f.empty_line();
             f.comment("Emit trap.");
-            fmtln!(f, "if let GprMem::Mem({op}) = &self.{op} {{");
+            let reg_kind = op.reg_kind();
+            let op = op.to_string();
+            match reg_kind {
+                RegKind::Vec(_) => fmtln!(f, "if let VecMem::Vec({op}) = &self.{op} {{"),
+                _ => fmtln!(f, "if let GprMem::Mem({op}) = &self.{op} {{"),
+            }
             f.indent(|f| {
                 fmtln!(f, "if let Some(trap_code) = {op}.trap_code() {{");
                 f.indent(|f| {

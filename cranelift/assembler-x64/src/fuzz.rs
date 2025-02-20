@@ -79,6 +79,8 @@ pub struct FuzzRegs;
 impl Registers for FuzzRegs {
     type ReadGpr = FuzzReg;
     type ReadWriteGpr = FuzzReg;
+    //type ReadVec = FuzzReg;
+    //type ReadWriteVec = FuzzReg;
 }
 
 /// A simple `u8` register type for fuzzing only.

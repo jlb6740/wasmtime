@@ -225,36 +225,34 @@ pub enum Location {
     rm32,
     rm64,
 
-    xmm,
-    ymm,
-    zmm,
+    xmm1,
+    xmm2,
+    xmm3m128,
 
-    xmmm,
-    ymmm,
-    zmmm,
+    ymm1,
+    ymm2,
+    ymm3m256,
 }
 
 impl Location {
     /// Return the number of bits accessed.
     #[must_use]
-    pub fn bits(&self) -> u8 {
+    pub fn bits(&self) -> u16 {
         use Location::*;
         match self {
             al | imm8 | r8 | rm8 => 8,
             ax | imm16 | r16 | rm16 => 16,
             eax | imm32 | r32 | rm32 => 32,
             rax | r64 | rm64 => 64,
-            xmm | xmmm => 128,
-            //ymm | ymmm => 256,
-            //zmm | zmmm => 512,
-            _ => todo!(),
+            xmm1 | xmm2 | xmm3m128 => 128,
+            ymm1 | ymm2 | ymm3m256 => 256,
         }
     }
 
     /// Return the number of bytes accessed, for convenience.
     #[must_use]
     pub fn bytes(&self) -> u8 {
-        self.bits() / 8
+        (self.bits() / 8).try_into().unwrap()
     }
 
     /// Return `true` if the location accesses memory; `false` otherwise.
@@ -262,8 +260,10 @@ impl Location {
     pub fn uses_memory(&self) -> bool {
         use Location::*;
         match self {
-            al | ax | eax | rax | imm8 | imm16 | imm32 | r8 | r16 | r32 | r64 | xmm | ymm | zmm => false,
-            rm8 | rm16 | rm32 | rm64 | xmmm | ymmm | zmmm => true,
+            al | ax | eax | rax | imm8 | imm16 | imm32 | r8 | r16 | r32 | r64 | xmm1 | xmm2 | ymm1 | ymm2 => {
+                false
+            }
+            rm8 | rm16 | rm32 | rm64 | xmm3m128 | ymm3m256 => true,
         }
     }
 
@@ -274,7 +274,8 @@ impl Location {
         use Location::*;
         match self {
             al | ax | eax | rax | imm8 | imm16 | imm32 => false,
-            r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 | xmm | ymm | zmm | xmmm | ymmm | zmmm => true,
+            r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 | xmm1 | xmm2 | xmm3m128 | ymm1 | ymm2
+            | ymm3m256 => true,
         }
     }
 
@@ -285,8 +286,8 @@ impl Location {
         match self {
             al | ax | eax | rax => OperandKind::FixedReg(*self),
             imm8 | imm16 | imm32 => OperandKind::Imm(*self),
-            r8 | r16 | r32 | r64 | xmm | ymm | zmm => OperandKind::Reg(*self),
-            rm8 | rm16 | rm32 | rm64 | xmmm | ymmm | zmmm => OperandKind::RegMem(*self),
+            r8 | r16 | r32 | r64 | xmm1 | xmm2 | ymm1 | ymm2 => OperandKind::Reg(*self),
+            rm8 | rm16 | rm32 | rm64 | xmm3m128 | ymm3m256 => OperandKind::RegMem(*self),
         }
     }
 
@@ -295,7 +296,7 @@ impl Location {
         use Location::*;
         match self {
             al | ax | eax | rax | r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 => RegKind::Gpr(*self),
-            xmm | ymm | zmm | xmmm | ymmm | zmmm => RegKind::Vec(*self),
+            xmm1 | xmm2 | xmm3m128 | ymm1 | ymm2 | ymm3m256 => RegKind::Vec(*self),
             imm8 | imm16 | imm32 => RegKind::Mem(*self),
         }
     }
@@ -324,13 +325,12 @@ impl core::fmt::Display for Location {
             rm32 => write!(f, "rm32"),
             rm64 => write!(f, "rm64"),
 
-            xmm => write!(f, "xmm"),
-            ymm => write!(f, "ymm"),
-            zmm => write!(f, "zmm"),
-
-            xmmm => write!(f, "xmmm"),
-            ymmm => write!(f, "ymmm"),
-            zmmm => write!(f, "zmmm"),
+            xmm1 => write!(f, "xmm1"),
+            xmm2 => write!(f, "xmm2"),
+            xmm3m128 => write!(f, "xmm3m128"),
+            ymm1 => write!(f, "ymm1"),
+            ymm2 => write!(f, "ymm2"),
+            ymm3m256 => write!(f, "ymm3m256"),
         }
     }
 }

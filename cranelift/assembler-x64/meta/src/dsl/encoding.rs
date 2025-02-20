@@ -303,7 +303,7 @@ pub enum Imm {
 }
 
 impl Imm {
-    fn bits(&self) -> u8 {
+    fn bits(&self) -> u16 {
         match self {
             Imm::None => 0,
             Imm::ib => 8,
