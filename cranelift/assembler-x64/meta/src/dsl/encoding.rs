@@ -32,8 +32,22 @@ pub fn rex(opcode: impl Into<Opcodes>) -> Rex {
 
 /// An abbreviated constructor for VEX-encoded instructions.
 #[must_use]
-pub fn vex() -> Vex {
-    Vex {}
+pub fn vex(opcode: impl Into<Opcodes>) -> Vex {
+    Vex {
+        opcodes: opcode.into(),
+        w: false,
+        r: false,
+        digit: 0,
+        is4: false,
+        size_e: 0,
+        wig: false,
+        rxb: 0,
+        length: VexLength::default(),
+        mmmmm: VexMMMMM::_OF,
+        pp: VexPP::None,
+        reg: 0x00,
+        imm: None,
+    }
 }
 
 /// Enumerate the ways x64 encodes instructions.
@@ -48,7 +62,7 @@ impl Encoding {
     pub fn validate(&self, operands: &[Operand]) {
         match self {
             Encoding::Rex(rex) => rex.validate(operands),
-            Encoding::Vex(vex) => vex.validate(),
+            Encoding::Vex(vex) => vex.validate(operands),
         }
     }
 }
@@ -57,7 +71,7 @@ impl fmt::Display for Encoding {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Encoding::Rex(rex) => write!(f, "{rex}"),
-            Encoding::Vex(_vex) => todo!(),
+            Encoding::Vex(vex) => write!(f, "{vex}"),
         }
     }
 }
@@ -423,7 +437,7 @@ pub enum Imm {
 }
 
 impl Imm {
-    fn bits(&self) -> u8 {
+    fn bits(&self) -> u16 {
         match self {
             Imm::None => 0,
             Imm::ib => 8,
@@ -446,10 +460,129 @@ impl fmt::Display for Imm {
     }
 }
 
-pub struct Vex {}
+pub struct Vex {
+    //pub length: VexVectorLength,
+    // pub prefix: LegacyPrefix,
+    // pub map: OpcodeMap,
+    pub opcodes: Opcodes,
+    pub w: bool,
+    pub r: bool,
+    pub digit: u8,
+    pub is4: bool,
+    pub size_e: u8,
+    pub wig: bool,
+    pub rxb: u8,
+    pub length: VexLength,
+    pub mmmmm: VexMMMMM,
+    pub pp: VexPP,
+    pub reg: u8,
+    //pub rm: RegisterOrAmode,
+    //pub vvvv: Option<Register>,
+    pub imm: Option<u8>,
+}
+
+#[derive(PartialEq)]
+pub enum VexPP {
+    None,
+    /// Operand size override -- here, denoting "16-bit operation".
+    _66,
+    /// The lock prefix.
+    _F3,
+    _F2,
+}
+
+#[derive(PartialEq)]
+pub enum VexMMMMM {
+    _OF,
+    /// Operand size override -- here, denoting "16-bit operation".
+    _OF3A,
+    /// The lock prefix.
+    _OF3B,
+}
+
+pub enum VexLength {
+    _128,
+    _256,
+}
+
+impl Default for VexLength {
+    fn default() -> Self {
+        Self::_128
+    }
+}
 
 impl Vex {
-    fn validate(&self) {
-        todo!()
+    pub fn length(self, length: VexLength) -> Self {
+        Self { length, ..self }
+    }
+    pub fn pp(self, pp: VexPP) -> Self {
+        Self { pp, ..self }
+    }
+    pub fn mmmmm(self, mmmmm: VexMMMMM) -> Self {
+        Self { mmmmm, ..self }
+    }
+
+    fn validate(&self, _operands: &[Operand]) {
+        /*
+        assert!(self.digit < 8);
+        assert!(!(self.r && self.digit > 0));
+        assert!(!(self.r && self.imm != Imm::None));
+        assert!(
+            !(self.w && (self.prefixes.contains_66())),
+            "though valid, if REX.W is set then the 66 prefix is ignored--avoid encoding this"
+        );
+        // assert!(self.prefixes.contains_66() && operands.iter().all(|&op| op == 16));
+
+        if let Some(OperandKind::Imm(op)) = operands
+            .iter()
+            .map(|o| o.location.kind())
+            .find(|k| matches!(k, OperandKind::Imm(_)))
+        {
+            assert_eq!(op.bits(), self.imm.bits());
+        }
+        */
+    }
+}
+
+impl From<Vex> for Encoding {
+    fn from(vex: Vex) -> Encoding {
+        Encoding::Vex(vex)
+    }
+}
+
+impl fmt::Display for Vex {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "VEX")?;
+        /*    match self.prefixes {
+            LegacyPrefixes::NoPrefix => {}
+            LegacyPrefixes::_66 => write!(f, "0x66 + ")?,
+            LegacyPrefixes::_F0 => write!(f, "0xF0 + ")?,
+            LegacyPrefixes::_66F0 => write!(f, "0x66F0 + ")?,
+            LegacyPrefixes::_F2 => write!(f, "0xF2 + ")?,
+            LegacyPrefixes::_F3 => write!(f, "0xF3 + ")?,
+            LegacyPrefixes::_66F3 => write!(f, "0x66F3 + ")?,
+        }
+        if self.w {
+            write!(f, "REX.W + ")?;
+        }
+        */
+        match self.length {
+            VexLength::_128 => write!(f, ".128")?,
+            VexLength::_256 => write!(f, ".256")?,
+        }
+        write!(f, " {:#04x}", self.opcodes.primary)?;
+
+        /*
+        if self.r {
+            write!(f, " /r")?;
+        }
+        if self.digit > 0 {
+            write!(f, " /{}", self.digit)?;
+        }
+        if self.imm != Imm::None {
+            write!(f, " {}", self.imm)?;
+        }*/
+
+        Ok(())
     }
 }

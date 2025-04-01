@@ -29,7 +29,12 @@ pub fn list() -> Vec<Inst> {
         inst("andl", fmt("RM", [rw(r32), r(rm32)]), rex(0x23).r(), _64b | compat),
         inst("andq", fmt("RM", [rw(r64), r(rm64)]), rex(0x23).w().r(), _64b),
         // Vector instructions.
-        inst("andps", fmt("A", [rw(xmm), r(align(rm128))]), rex([0x0F, 0x54]).r(), _64b | compat | sse),
-        inst("andpd", fmt("A", [rw(xmm), r(align(rm128))]), rex([0x66, 0x0F, 0x54]).r(), _64b | compat | sse),
+        inst("andps", fmt("A", [rw(xmm1), r(align(rm128))]), rex([0x0F, 0x54]).r(), _64b | compat | sse),
+        inst(
+            "andpd",
+            fmt("A", [rw(xmm1), r(align(rm128))]),
+            rex([0x66, 0x0F, 0x54]).r(),
+            _64b | compat | sse,
+        ),
     ]
 }

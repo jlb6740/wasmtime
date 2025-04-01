@@ -166,6 +166,7 @@ impl Registers for FuzzRegs {
     type ReadWriteGpr = FuzzReg;
     type ReadXmm = FuzzReg;
     type ReadWriteXmm = FuzzReg;
+    type WriteXmm = FuzzReg;
 }
 
 /// A simple `u8` register type for fuzzing only.
@@ -224,6 +225,7 @@ pub trait RegistersArbitrary:
     ReadWriteGpr: for<'a> Arbitrary<'a>,
     ReadXmm: for<'a> Arbitrary<'a>,
     ReadWriteXmm: for<'a> Arbitrary<'a>,
+    WriteXmm: for<'a> Arbitrary<'a>,
 >
 {
 }
@@ -235,6 +237,7 @@ where
     R::ReadWriteGpr: for<'a> Arbitrary<'a>,
     R::ReadXmm: for<'a> Arbitrary<'a>,
     R::ReadWriteXmm: for<'a> Arbitrary<'a>,
+    R::WriteXmm: for<'a> Arbitrary<'a>,
 {
 }
 

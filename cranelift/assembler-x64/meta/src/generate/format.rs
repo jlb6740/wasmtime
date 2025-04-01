@@ -32,6 +32,14 @@ impl dsl::Format {
         self.generate_immediate(f);
     }
 
+    pub fn generate_vex_encoding(&self, f: &mut Formatter, _vex: &dsl::Vex) {
+        //self.generate_legacy_prefix(f, vex);
+        //self.generate_vex_prefix(f, rex);
+        //self.generate_opcodes(f, vex);
+        //self.generate_modrm_byte(f, vex);
+        self.generate_immediate(f);
+    }
+
     /// `buf.put1(...);`
     fn generate_legacy_prefix(&self, f: &mut Formatter, rex: &dsl::Rex) {
         use dsl::LegacyPrefix::*;

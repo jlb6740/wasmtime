@@ -15,6 +15,7 @@
 //!     type ReadWriteGpr = u8;
 //!     type ReadXmm = u8;
 //!     type ReadWriteXmm = u8;
+//!     type WriteXmm = u8;
 //! }
 //!
 //! // Then, build one of the `AND` instructions; this one operates on an

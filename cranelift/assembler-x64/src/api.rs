@@ -116,6 +116,9 @@ pub trait Registers {
 
     /// An x64 SSE register that may be read and written.
     type ReadWriteXmm: AsReg;
+
+    /// An x64 SSE register that may be written.
+    type WriteXmm: AsReg;
 }
 
 /// Describe how to interact with an external register type.
@@ -169,10 +172,15 @@ pub trait RegisterVisitor<R: Registers> {
     fn read_xmm(&mut self, reg: &mut R::ReadXmm);
     /// Visit a read-write SSE register.
     fn read_write_xmm(&mut self, reg: &mut R::ReadWriteXmm);
+    // Visit a write-only SSE register.
+    fn write_xmm(&mut self, reg: &mut R::WriteXmm);
     /// Visit a read-only fixed SSE register; for safety, this register cannot
     /// be modified in-place.
     fn fixed_read_xmm(&mut self, reg: &R::ReadXmm);
     /// Visit a read-write fixed SSE register; for safety, this register cannot
     /// be modified in-place.
     fn fixed_read_write_xmm(&mut self, reg: &R::ReadWriteXmm);
+    /// Visit a write-only fixed SSE register; for safety, this register cannot
+    /// be modified in-place.
+    fn fixed_write_xmm(&mut self, reg: &R::WriteXmm);
 }

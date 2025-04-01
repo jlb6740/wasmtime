@@ -41,7 +41,12 @@ pub fn list() -> Vec<Inst> {
         inst("adcl", fmt("RM", [rw(r32), r(rm32)]), rex(0x13).r(), _64b | compat),
         inst("adcq", fmt("RM", [rw(r64), r(rm64)]), rex(0x13).w().r(), _64b),
         // Vector instructions.
-        inst("addps", fmt("A", [rw(xmm), r(align(rm128))]), rex([0x0F, 0x58]).r(), _64b | compat | sse),
-        inst("addpd", fmt("A", [rw(xmm), r(align(rm128))]), rex([0x66, 0x0F, 0x58]).r(), _64b | compat | sse),
+        inst("addps", fmt("A", [rw(xmm1), r(align(rm128))]), rex([0x0F, 0x58]).r(), _64b | compat | sse),
+        inst(
+            "addpd",
+            fmt("A", [rw(xmm1), r(align(rm128))]),
+            rex([0x66, 0x0F, 0x58]).r(),
+            _64b | compat | sse,
+        ),
     ]
 }

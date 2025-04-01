@@ -101,7 +101,19 @@ impl dsl::Inst {
                     f.empty_line();
                     f.comment("Emit trap.");
                     match op {
-                        crate::dsl::Location::rm128 => {
+                        crate::dsl::Location::rm128
+                        | crate::dsl::Location::xmm1
+                        | crate::dsl::Location::xmm2
+                        | crate::dsl::Location::xmm3
+                        | crate::dsl::Location::xmm_m128
+                        | crate::dsl::Location::ymm1
+                        | crate::dsl::Location::ymm2
+                        | crate::dsl::Location::ymm3
+                        | crate::dsl::Location::ymm_m256
+                        | crate::dsl::Location::zmm1
+                        | crate::dsl::Location::zmm2
+                        | crate::dsl::Location::zmm3
+                        | crate::dsl::Location::zmm_m512 => {
                             fmtln!(f, "if let XmmMem::Mem({op}) = &self.{op} {{");
                         }
                         _ => {
@@ -118,7 +130,8 @@ impl dsl::Inst {
 
                 match &self.encoding {
                     dsl::Encoding::Rex(rex) => self.format.generate_rex_encoding(f, rex),
-                    dsl::Encoding::Vex(_) => todo!(),
+                    dsl::Encoding::Vex(vex) => self.format.generate_vex_encoding(f, vex),
+                    //dsl::Encoding::Vex(_) => todo!(),
                 }
             },
         );

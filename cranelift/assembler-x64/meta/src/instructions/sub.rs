@@ -41,7 +41,12 @@ pub fn list() -> Vec<Inst> {
         inst("sbbl", fmt("RM", [rw(r32), r(rm32)]), rex(0x1B).r(), _64b | compat),
         inst("sbbq", fmt("RM", [rw(r64), r(rm64)]), rex(0x1B).w().r(), _64b),
         // Vector instructions.
-        inst("subps", fmt("A", [rw(xmm), r(align(rm128))]), rex([0x0F, 0x5C]).r(), _64b | compat | sse),
-        inst("subpd", fmt("A", [rw(xmm), r(align(rm128))]), rex([0x66, 0x0F, 0x5C]).r(), _64b | compat | sse),
+        inst("subps", fmt("A", [rw(xmm1), r(align(rm128))]), rex([0x0F, 0x5C]).r(), _64b | compat | sse),
+        inst(
+            "subpd",
+            fmt("A", [rw(xmm1), r(align(rm128))]),
+            rex([0x66, 0x0F, 0x5C]).r(),
+            _64b | compat | sse,
+        ),
     ]
 }

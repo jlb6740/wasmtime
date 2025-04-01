@@ -38,14 +38,27 @@ pub fn rust_convert_isle_to_assembler(op: &Operand) -> Option<&'static str> {
         OperandKind::Reg(r) => Some(match (r.bits(), op.mutability) {
             (128, Mutability::Read) => "cranelift_assembler_x64::Xmm::new",
             (128, Mutability::ReadWrite) => "self.convert_xmm_to_assembler_read_write_xmm",
+            (128, Mutability::Write) => "self.convert_xmm_to_assembler_write_xmm",
+            (256, Mutability::Read) => "cranelift_assembler_x64::Ymm::new",
+            (256, Mutability::ReadWrite) => "self.convert_ymm_to_assembler_read_write_ymm",
+            (256, Mutability::Write) => "self.convert_ymm_to_assembler_write_ymm",
+            (512, Mutability::Read) => "cranelift_assembler_x64::Zmm::new",
+            (512, Mutability::ReadWrite) => "self.convert_zmm_to_assembler_read_write_zmm",
+            (512, Mutability::Write) => "self.convert_zmm_to_assembler_write_zmm",
             (_, Mutability::Read) => "cranelift_assembler_x64::Gpr::new",
             (_, Mutability::ReadWrite) => "self.convert_gpr_to_assembler_read_write_gpr",
+            _ => unreachable!(),
         }),
         OperandKind::RegMem(r) => Some(match (r.bits(), op.mutability) {
             (128, Mutability::Read) => "self.convert_xmm_mem_to_assembler_read_xmm_mem",
             (128, Mutability::ReadWrite) => "self.convert_xmm_mem_to_assembler_read_write_xmm_mem",
+            (128, Mutability::Write) => "self.convert_xmm_mem_to_assembler_write_xmm_mem",
+            (256, Mutability::Read) => "self.convert_ymm_mem_to_assembler_read_ymm_mem",
+            (256, Mutability::ReadWrite) => "self.convert_ymm_mem_to_assembler_read_write_ymm_mem",
+            (256, Mutability::Write) => "self.convert_ymm_mem_to_assembler_write_ymm_mem",
             (_, Mutability::Read) => "self.convert_gpr_mem_to_assembler_read_gpr_mem",
             (_, Mutability::ReadWrite) => "self.convert_gpr_mem_to_assembler_read_write_gpr_mem",
+            _ => unreachable!(),
         }),
         OperandKind::Imm(loc) => match (op.extension.is_sign_extended(), loc.bits()) {
             (true, 8) => Some("cranelift_assembler_x64::Simm8::new"),
@@ -167,6 +180,7 @@ pub fn generate_macro_inst_fn(f: &mut Formatter, inst: &Inst) {
                             });
                         }
                     },
+                    Write => todo!(),
                 },
                 _ => panic!("instruction has more than one result"),
             }
@@ -323,7 +337,8 @@ pub fn isle_constructors(format: &Format) -> Vec<IsleConstructor> {
                         128 => vec![IsleConstructor::RetXmm, IsleConstructor::RetMemorySideEffect],
                         _ => vec![IsleConstructor::RetGpr, IsleConstructor::RetMemorySideEffect],
                     },
-                }
+                },
+                Write => todo!(),
             },
             other => panic!("unsupported number of write operands {other:?}"),
         }

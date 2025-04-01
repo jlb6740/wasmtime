@@ -8,9 +8,9 @@ mod encoding;
 mod features;
 pub mod format;
 
-pub use encoding::{rex, vex, Encoding, LegacyPrefix, Rex};
+pub use encoding::{rex, vex, Encoding, LegacyPrefix, Rex, Vex, VexLength, VexMMMMM, VexPP};
 pub use features::{Feature, Features, ALL_FEATURES};
-pub use format::{align, fmt, r, rw, sxl, sxq, sxw};
+pub use format::{align, fmt, r, rw, sxl, sxq, sxw, w};
 pub use format::{Extension, Format, Location, Mutability, Operand, OperandKind};
 
 /// Abbreviated constructor for an x64 instruction.
