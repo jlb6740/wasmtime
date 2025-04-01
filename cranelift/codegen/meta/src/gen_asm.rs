@@ -117,7 +117,7 @@ pub fn generate_macro_inst_fn(f: &mut Formatter, inst: &Inst) {
                 [] => fmtln!(f, "SideEffectNoResult::Inst(inst)"),
                 [one] => match one.mutability {
                     Read => unreachable!(),
-                    ReadWrite => match one.location.kind() {
+                    ReadWrite | Write => match one.location.kind() {
                         OperandKind::Imm(_) => unreachable!(),
                         // One read/write register output? Output the instruction
                         // and that register.
@@ -149,6 +149,7 @@ pub fn generate_macro_inst_fn(f: &mut Formatter, inst: &Inst) {
                             });
                         }
                     },
+                    //Write => todo!(),
                 },
                 _ => panic!("instruction has more than one result"),
             }
@@ -290,7 +291,7 @@ pub fn isle_constructors(format: &Format) -> Vec<IsleConstructor> {
             [] => unimplemented!("if you truly need this (and not a `SideEffect*`), add a `NoReturn` variant to `AssemblerOutputs`"),
             [one] => match one.mutability {
                 Read => unreachable!(),
-                ReadWrite => match one.location.kind() {
+                ReadWrite | Write => match one.location.kind() {
                     Imm(_) => unreachable!(),
                     // One read/write register output? Output the instruction
                     // and that register.
@@ -306,7 +307,8 @@ pub fn isle_constructors(format: &Format) -> Vec<IsleConstructor> {
                         128 => vec![IsleConstructor::RetXmm, IsleConstructor::RetMemorySideEffect],
                         _ => vec![IsleConstructor::RetGpr, IsleConstructor::RetMemorySideEffect],
                     },
-                }
+                },
+                //Write => todo!(),
             },
             other => panic!("unsupported number of write operands {other:?}"),
         }

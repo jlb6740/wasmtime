@@ -49,6 +49,16 @@ pub fn r(op: impl Into<Operand>) -> Operand {
     op
 }
 
+#[must_use]
+pub fn w(location: Location) -> Operand {
+    Operand {
+        location,
+        mutability: Mutability::Write,
+        extension: Extension::None,
+        align: false,
+    }
+}
+
 /// An abbreviated constructor for a memory operand that requires alignment.
 pub fn align(location: Location) -> Operand {
     assert!(location.uses_memory());
@@ -258,7 +268,6 @@ pub enum Location {
     rm64,
 
     // XMM registers, and their memory forms.
-    xmm,
     xmm_m32,
     xmm_m64,
     xmm_m128,
@@ -268,26 +277,41 @@ pub enum Location {
     m16,
     m32,
     m64,
+    xmm1,
+    xmm2,
+    xmm3,
+    ymm1,
+    ymm2,
+    ymm3,
+    zmm1,
+    zmm2,
+    zmm3,
+
+    xmm_m128,
+    ymm_m256,
+    zmm_m512,
 }
 
 impl Location {
     /// Return the number of bits accessed.
     #[must_use]
-    pub fn bits(&self) -> u8 {
+    pub fn bits(&self) -> u16 {
         use Location::*;
         match self {
             al | cl | imm8 | r8 | rm8 | m8 => 8,
             ax | imm16 | r16 | rm16 | m16 => 16,
             eax | imm32 | r32 | rm32 | m32 | xmm_m32 => 32,
             rax | r64 | rm64 | m64 | xmm_m64 => 64,
-            xmm | xmm_m128 => 128,
+            xmm1 | xmm2 | xmm3 | xmm_m128 => 128,
+            ymm1 | ymm2 | ymm3 | ymm_m256 => 256,
+            zmm1 | zmm2 | zmm3 | zmm_m512 => 512,
         }
     }
 
     /// Return the number of bytes accessed, for convenience.
     #[must_use]
-    pub fn bytes(&self) -> u8 {
-        self.bits() / 8
+    pub fn bytes(&self) -> u16 {
+        self.bits() / 16
     }
 
     /// Return `true` if the location accesses memory; `false` otherwise.
@@ -295,8 +319,11 @@ impl Location {
     pub fn uses_memory(&self) -> bool {
         use Location::*;
         match self {
-            al | cl | ax | eax | rax | imm8 | imm16 | imm32 | r8 | r16 | r32 | r64 | xmm => false,
-            rm8 | rm16 | rm32 | rm64 | xmm_m32 | xmm_m64 | xmm_m128 | m8 | m16 | m32 | m64 => true,
+            al | cl | ax | eax | rax | imm8 | imm16 | imm32 | r8 | r16 | r32 | r64 | xmm1 | xmm2 | xmm3 | ymm1
+            | ymm2 | ymm3 | zmm1 | zmm2 | zmm3 => false,
+            rm8 | rm16 | rm32 | rm64 | xmm_m32 | xmm_m64 | m8 | m16 | m32 | m64 | xmm_m128 | ymm_m256 | zmm_m512 => {
+                true
+            }
         }
     }
 
@@ -306,9 +333,10 @@ impl Location {
     pub fn uses_register(&self) -> bool {
         use Location::*;
         match self {
-            imm8 | imm16 | imm32 => false,
-            al | ax | eax | rax | cl | r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 | xmm | xmm_m32 | xmm_m64
-            | xmm_m128 | m8 | m16 | m32 | m64 => true,
+            cl | imm8 | imm16 | imm32 => false,
+            al | ax | eax | rax | r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 | rm128 | m8 | m16 | m32 | m64
+            | xmm1 | xmm2 | xmm3 | xmm_m32 | xmm_m64 | ymm1 | ymm2 | ymm3 | zmm1 | zmm2 | zmm3 | xmm_m128
+            | ymm_m256 | zmm_m512 => true,
         }
     }
 
@@ -319,8 +347,10 @@ impl Location {
         match self {
             al | ax | eax | rax | cl => OperandKind::FixedReg(*self),
             imm8 | imm16 | imm32 => OperandKind::Imm(*self),
-            r8 | r16 | r32 | r64 | xmm => OperandKind::Reg(*self),
-            rm8 | rm16 | rm32 | rm64 | xmm_m32 | xmm_m64 | xmm_m128 => OperandKind::RegMem(*self),
+            r8 | r16 | r32 | r64 | xmm1 | xmm2 | xmm3 | ymm1 | ymm2 | ymm3 | zmm1 | zmm2 | zmm3 => {
+                OperandKind::Reg(*self)
+            }
+            rm8 | rm16 | rm32 | rm64 | xmm_m32 | xmm_m64 | xmm_m128 | ymm_m256 | zmm_m512 => OperandKind::RegMem(*self),
             m8 | m16 | m32 | m64 => OperandKind::Mem(*self),
         }
     }
@@ -335,7 +365,8 @@ impl Location {
         match self {
             imm8 | imm16 | imm32 | m8 | m16 | m32 | m64 => None,
             al | ax | eax | rax | cl | r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 => Some(RegClass::Gpr),
-            xmm | xmm_m32 | xmm_m64 | xmm_m128 => Some(RegClass::Xmm),
+            xmm1 | xmm2 | xmm3 | ymm1 | ymm2 | ymm3 | zmm1 | zmm2 | zmm3 | xmm_m32 | xmm_m64 | xmm_m128 | ymm_m256
+            | zmm_m512 => Some(RegClass::Xmm),
         }
     }
 }
@@ -372,6 +403,21 @@ impl core::fmt::Display for Location {
             m16 => write!(f, "m16"),
             m32 => write!(f, "m32"),
             m64 => write!(f, "m64"),
+            xmm1 => write!(f, "xmm1"),
+            xmm2 => write!(f, "xmm2"),
+            xmm3 => write!(f, "xmm3"),
+
+            ymm1 => write!(f, "ymm1"),
+            ymm2 => write!(f, "ymm2"),
+            ymm3 => write!(f, "ymm3"),
+
+            zmm1 => write!(f, "zmm1"),
+            zmm2 => write!(f, "zmm2"),
+            zmm3 => write!(f, "zmm3"),
+
+            xmm_m128 => write!(f, "xmm_m128"),
+            ymm_m256 => write!(f, "ymm_m256"),
+            zmm_m512 => write!(f, "zmm_m512"),
         }
     }
 }
@@ -402,6 +448,7 @@ pub enum OperandKind {
 pub enum Mutability {
     Read,
     ReadWrite,
+    Write,
 }
 
 impl Mutability {
@@ -411,6 +458,7 @@ impl Mutability {
     pub fn is_read(&self) -> bool {
         match self {
             Mutability::Read | Mutability::ReadWrite => true,
+            Mutability::Write => false,
         }
     }
 
@@ -420,7 +468,7 @@ impl Mutability {
     pub fn is_write(&self) -> bool {
         match self {
             Mutability::Read => false,
-            Mutability::ReadWrite => true,
+            Mutability::ReadWrite | Mutability::Write => true,
         }
     }
 }
@@ -436,6 +484,7 @@ impl core::fmt::Display for Mutability {
         match self {
             Self::Read => write!(f, "r"),
             Self::ReadWrite => write!(f, "rw"),
+            Self::Write => write!(f, "w"),
         }
     }
 }
