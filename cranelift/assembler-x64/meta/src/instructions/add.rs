@@ -1,4 +1,4 @@
-use crate::dsl::{align, fmt, inst, r, rex, rw, sxl, sxq};
+use crate::dsl::{fmt, inst, r, rex, rw, sxl, sxq};
 use crate::dsl::{Feature::*, Inst, Location::*};
 
 pub fn list() -> Vec<Inst> {
@@ -61,8 +61,5 @@ pub fn list() -> Vec<Inst> {
         inst("lock_adcw", fmt("MR", [rw(m16), r(r16)]), rex([0xf0, 0x66, 0x11]).r(), _64b | compat),
         inst("lock_adcl", fmt("MR", [rw(m32), r(r32)]), rex([0xf0, 0x11]).r(), _64b | compat),
         inst("lock_adcq", fmt("MR", [rw(m64), r(r64)]), rex([0xf0, 0x11]).w().r(), _64b),
-        // Vector instructions.
-        inst("addps", fmt("A", [rw(xmm), r(align(rm128))]), rex([0x0F, 0x58]).r(), _64b | compat | sse),
-        inst("addpd", fmt("A", [rw(xmm), r(align(rm128))]), rex([0x66, 0x0F, 0x58]).r(), _64b | compat | sse),
     ]
 }

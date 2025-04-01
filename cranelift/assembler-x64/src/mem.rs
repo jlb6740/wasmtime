@@ -74,6 +74,13 @@ pub(crate) fn visit_amode<R: Registers>(
         }
         Amode::RipRelative { .. } => {}
     }
+
+    // pub fn get_flags(&self) -> MemFlags {
+    //    match self {
+    //        Amode::ImmReg { flags, .. } | Amode::ImmRegRegShift { flags, .. } => *flags,
+    //        Amode::RipRelative { .. } => MemFlags::trusted(),
+    //    }
+    //}
 }
 
 /// A 32-bit immediate for address offsets.
@@ -297,7 +304,17 @@ impl<R: AsReg, M: AsReg> XmmMem<R, M> {
             XmmMem::Mem(amode) => amode.to_string(),
         }
     }
+    pub fn default() -> Self {
+        XmmMem::Xmm(R::new(0))
+    }
 }
+/*
+impl Into<u8> for XmmMem<R: AsReg, M: AsReg>  {
+    fn into(self) -> u8 {
+        self.value
+    }
+}
+*/
 
 /// Emit the ModRM/SIB/displacement sequence for a memory operand.
 pub fn emit_modrm_sib_disp<R: AsReg>(
