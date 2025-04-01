@@ -16,10 +16,14 @@ impl dsl::Operand {
             }
             Reg(r) => match r.bits() {
                 128 => Some(format!("Xmm<R::{}Xmm>", self.mutability.generate_type())),
+                256 => Some(format!("Ymm<R::{}Ymm>", self.mutability.generate_type())),
+                512 => Some(format!("Zmm<R::{}Zmm>", self.mutability.generate_type())),
                 _ => Some(format!("Gpr<R::{}Gpr>", self.mutability.generate_type())),
             },
             RegMem(rm) => match rm.bits() {
                 128 => Some(format!("XmmMem<R::{}Xmm, R::ReadGpr>", self.mutability.generate_type())),
+                256 => Some(format!("YmmMem<R::{}Ymm, R::ReadGpr>", self.mutability.generate_type())),
+                512 => Some(format!("ZmmMem<R::{}Zmm, R::ReadGpr>", self.mutability.generate_type())),
                 _ => Some(format!("GprMem<R::{}Gpr, R::ReadGpr>", self.mutability.generate_type())),
             },
             Mem(_) => Some(format!("Amode<R::ReadGpr>")),
@@ -50,7 +54,8 @@ impl dsl::Location {
                 Some(size) => format!("self.{self}.to_string({size})"),
                 None => unreachable!(),
             },
-            xmm | rm128 | m8 | m16 | m32 | m64 => format!("self.{self}.to_string()"),
+            xmm1 | xmm2 | xmm3 | ymm1 | ymm2 | ymm3 | zmm1 | zmm2 | zmm3 | xmm_m128 | ymm_m256 | zmm_m512 | rm128
+            | m8 | m16 | m32 | m64 => format!("self.{self}.to_string()"),
         }
     }
 
@@ -67,7 +72,7 @@ impl dsl::Location {
             m8 | m16 | m32 | m64 => {
                 panic!("no need to generate a size for memory-only access")
             }
-            xmm | rm128 => {
+            xmm1 | xmm2 | xmm3 | ymm1 | ymm2 | ymm3 | zmm1 | zmm2 | zmm3 | xmm_m128 | ymm_m256 | zmm_m512 | rm128 => {
                 panic!("no need to generate a size for XMM-sized access")
             }
         }
@@ -80,8 +85,9 @@ impl dsl::Location {
         match self {
             al | ax | eax | rax => Some("gpr::enc::RAX"),
             cl => Some("gpr::enc::RCX"),
-            imm8 | imm16 | imm32 | r8 | r16 | r32 | r64 | xmm | rm8 | rm16 | rm32 | rm64 | rm128 | m8 | m16 | m32
-            | m64 => None,
+            imm8 | imm16 | imm32 | r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 | rm128 | m8 | m16 | m32 | m64
+            | xmm1 | xmm2 | xmm3 | ymm1 | ymm2 | ymm3 | zmm1 | zmm2 | zmm3 | xmm_m128 | ymm_m256 | zmm_m512 | rm8
+            | rm16 | rm32 | rm64 | rm128 => None,
         }
     }
 }
@@ -92,6 +98,7 @@ impl dsl::Mutability {
         match self {
             dsl::Mutability::Read => "read",
             dsl::Mutability::ReadWrite => "read_write",
+            dsl::Mutability::Write => "write",
         }
     }
 
@@ -100,6 +107,7 @@ impl dsl::Mutability {
         match self {
             dsl::Mutability::Read => "Read",
             dsl::Mutability::ReadWrite => "ReadWrite",
+            dsl::Mutability::Write => "Write",
         }
     }
 
@@ -108,6 +116,7 @@ impl dsl::Mutability {
         match self {
             dsl::Mutability::Read => "read_xmm",
             dsl::Mutability::ReadWrite => "read_write_xmm",
+            dsl::Mutability::Write => "write_xmm",
         }
     }
 }
