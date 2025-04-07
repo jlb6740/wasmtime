@@ -15,8 +15,13 @@
 //!
 //! [link]: https://software.intel.com/content/www/us/en/develop/articles/intel-sdm.html
 
+//use super::crate::Amode;
+//use super::mem::Amode;
 use super::{Operand, OperandKind};
 use core::fmt;
+//use cranelift_assembler_x64::mem::Amode;
+//use super::super::
+//mem::Amode;
 
 /// An abbreviated constructor for REX-encoded instructions.
 #[must_use]
@@ -34,6 +39,8 @@ pub fn rex(opcode: impl Into<Opcodes>) -> Rex {
 #[must_use]
 pub fn vex(opcode: impl Into<Opcodes>) -> Vex {
     Vex {
+        prefix: LegacyPrefix::NoPrefix,
+        map: OpcodeMap::None,
         opcodes: opcode.into(),
         w: false,
         r: false,
@@ -46,6 +53,8 @@ pub fn vex(opcode: impl Into<Opcodes>) -> Vex {
         mmmmm: VexMMMMM::_OF,
         pp: VexPP::None,
         reg: 0x00,
+        //rm: RegisterOrAmode::Register(0.into()),
+        vvvv: None,
         imm: None,
     }
 }
@@ -397,6 +406,17 @@ impl Prefixes {
     pub fn is_empty(&self) -> bool {
         self.group1.is_none() && self.group2.is_none() && self.group3.is_none() && self.group4.is_none()
     }
+    /// Emit the legacy prefix as bits (e.g. for EVEX instructions).
+    #[inline(always)]
+    pub fn bits(&self) -> u8 {
+        match self {
+            Self::NoPrefix => 0b00,
+            Self::_66 => 0b01,
+            Self::_F3 => 0b10,
+            Self::_F2 => 0b11,
+            _ => panic!("VEX and EVEX bits can only be extracted from single prefixes: None, 66, F3, F2"),
+        }
+    }
 }
 
 pub enum Group1Prefix {
@@ -598,8 +618,8 @@ impl fmt::Display for Imm {
 
 pub struct Vex {
     //pub length: VexVectorLength,
-    // pub prefix: LegacyPrefix,
-    // pub map: OpcodeMap,
+    pub prefix: LegacyPrefix,
+    pub map: OpcodeMap,
     pub opcodes: Opcodes,
     pub w: bool,
     pub r: bool,
@@ -613,7 +633,7 @@ pub struct Vex {
     pub pp: VexPP,
     pub reg: u8,
     //pub rm: RegisterOrAmode,
-    //pub vvvv: Option<Register>,
+    pub vvvv: Option<Register>,
     pub imm: Option<u8>,
 }
 
@@ -641,11 +661,89 @@ pub enum VexLength {
     _256,
 }
 
+impl VexLength {
+    /// Encode the `L` bit.
+    pub fn bits(&self) -> u8 {
+        match self {
+            Self::_128 => 0b0,
+            Self::_256 => 0b1,
+        }
+    }
+}
+
 impl Default for VexLength {
     fn default() -> Self {
         Self::_128
     }
 }
+
+/// Allows using the same opcode byte in different "opcode maps" to allow for more instruction
+/// encodings. See appendix A in the Intel Software Developer's Manual, volume 2A, for more details.
+#[allow(missing_docs)]
+#[derive(PartialEq)]
+pub enum OpcodeMap {
+    None,
+    _0F,
+    _0F38,
+    _0F3A,
+}
+
+impl OpcodeMap {
+    /// Normally the opcode map is specified as bytes in the instruction, but some x64 encoding
+    /// formats pack this information as bits in a prefix (e.g. VEX / EVEX).
+    pub fn bits(&self) -> u8 {
+        match self {
+            OpcodeMap::None => 0b00,
+            OpcodeMap::_0F => 0b01,
+            OpcodeMap::_0F38 => 0b10,
+            OpcodeMap::_0F3A => 0b11,
+        }
+    }
+}
+
+impl Default for OpcodeMap {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+/// Describe the register index to use. This wrapper is a type-safe way to pass
+/// around the registers defined in `inst/regs.rs`.
+#[derive(Debug, Copy, Clone, Default)]
+pub struct Register(u8);
+impl From<u8> for Register {
+    fn from(reg: u8) -> Self {
+        debug_assert!(reg < 16);
+        Self(reg)
+    }
+}
+impl Into<u8> for Register {
+    fn into(self) -> u8 {
+        self.0
+    }
+}
+
+/*
+#[allow(missing_docs)]
+#[derive(Debug, Clone)]
+
+pub enum RegisterOrAmode {
+    Register(Register),
+    Amode(Amode),
+}
+
+impl From<u8> for RegisterOrAmode {
+    fn from(reg: u8) -> Self {
+        RegisterOrAmode::Register(reg.into())
+    }
+}
+
+impl From<Amode> for RegisterOrAmode {
+    fn from(amode: Amode) -> Self {
+        RegisterOrAmode::Amode(amode)
+    }
+}
+*/
 
 impl Vex {
     pub fn length(self, length: VexLength) -> Self {

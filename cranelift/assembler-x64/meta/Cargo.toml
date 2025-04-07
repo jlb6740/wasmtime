@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 cranelift-srcgen = { workspace = true }
+#cranelift-assembler-x64 = { path = "../" }
 
 [lints]
 workspace = true

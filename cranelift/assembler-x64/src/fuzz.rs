@@ -265,7 +265,8 @@ mod test {
             println!("#{}: {inst}", count.fetch_add(1, Ordering::SeqCst));
             Ok(())
         })
-        .budget_ms(1_000);
+        .budget_ms(1_000)
+        .seed(0xe3347d2600000028);
 
         // This will run the `roundtrip` fuzzer for one second. To repeatably
         // test a single input, append `.seed(0x<failing seed>)`.

@@ -3,6 +3,8 @@
 use crate::api::{AsReg, CodeSink, Constant, KnownOffset, KnownOffsetTable, Label, TrapCode};
 use crate::gpr::{self, NonRspGpr, Size};
 use crate::rex::{encode_modrm, encode_sib, Imm, RexFlags};
+use crate::vex::*;
+use crate::xmm;
 
 /// x64 memory addressing modes.
 #[derive(Clone, Debug)]
