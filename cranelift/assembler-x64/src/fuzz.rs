@@ -58,7 +58,12 @@ fn disassemble(assembled: &[u8]) -> String {
     let insns = cs
         .disasm_all(assembled, 0x0)
         .expect("failed to disassemble");
-    assert_eq!(insns.len(), 1, "not a single instruction: {assembled:02x?}");
+    let len = insns.len();
+    assert_eq!(
+        insns.len(),
+        1,
+        "inst length: {len}, {assembled:?}, not a single instruction: {assembled:02x?}"
+    );
     let insn = insns.first().expect("at least one instruction");
     assert_eq!(
         assembled.len(),
@@ -256,7 +261,8 @@ mod test {
             println!("#{}: {inst}", count.fetch_add(1, Ordering::SeqCst));
             Ok(())
         })
-        .budget_ms(1_000);
+        .budget_ms(1_000)
+        .seed(0xe3347d2600000028);
 
         // This will run the `roundtrip` fuzzer for one second. To repeatably
         // test a single input, append `.seed(0x<failing seed>)`.

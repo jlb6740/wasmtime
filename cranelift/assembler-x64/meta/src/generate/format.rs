@@ -32,9 +32,9 @@ impl dsl::Format {
         self.generate_immediate(f);
     }
 
-    pub fn generate_vex_encoding(&self, f: &mut Formatter, _vex: &dsl::Vex) {
-        //self.generate_legacy_prefix(f, vex);
-        //self.generate_vex_prefix(f, rex);
+    pub fn generate_vex_encoding(&self, f: &mut Formatter, vex: &dsl::Vex) {
+        //self.generate_prefix(f, vex);
+        self.generate_vex_prefix(f, vex);
         //self.generate_opcodes(f, vex);
         //self.generate_modrm_byte(f, vex);
         self.generate_immediate(f);
@@ -141,6 +141,104 @@ impl dsl::Format {
                 });
             }
 
+            unknown => unimplemented!("unknown pattern: {unknown:?}"),
+        }
+    }
+
+    fn generate_vex_prefix(&self, f: &mut Formatter, vex: &dsl::Vex) {
+        use dsl::OperandKind::{FixedReg, Imm, Reg, RegMem};
+        f.empty_line();
+        f.comment("Emit VEX prefix.");
+
+        // Create a vex struct
+        fmtln!(f, "let mut vex = new_vex({});", vex.opcodes.primary);
+
+        // 2/3 byte prefix
+        //if b_bit(vex) && x_bit(vex) {
+        if false {
+            fmtln!(f, "// 2 byte prefix");
+            //fmtln!(f, "buf.put1(0xC5);");
+            fmtln!(f, "encode_2byte_prefix(&vex, buf)");
+        } else {
+            fmtln!(f, "// 3 byte prefix");
+            fmtln!(f, "encode_3byte_prefix(&vex, buf)");
+            //fmtln!(f, "buf.put1(0xC4);");
+            //fmtln!(f, "vex.encode_3byte_prefix");
+        }
+
+        /*
+        let find_8bit_registers = |l: &dsl::Location| l.bits() == 8 && matches!(l.kind(), Reg(_) | RegMem(_));
+        if self.locations().any(find_8bit_registers) {
+            fmtln!(f, "let mut vex = {};", vex.generate_flags());
+            for op in self.locations().copied().filter(find_8bit_registers) {
+                fmtln!(f, "self.{op}.always_emit_if_8bit_needed(&mut vex);");
+            }
+        } else {
+            fmtln!(f, "let vex = {};", vex.generate_flags());
+        }
+        */
+
+        match self.operands_by_kind().as_slice() {
+            [Reg(xmm1), Reg(xmm2), RegMem(xmm_m128)] => {
+                //fmtln!(f, "let {xmm1} = self.{xmm1}.enc();");
+                //fmtln!(f, "let {xmm2} = self.{xmm2}.enc();");
+                //fmtln!(f, "let {xmm_m128} = self.{xmm_m128}.enc();");
+                //fmtln!(f, "vex.emit_three_op(buf, {xmm1}, {xmm2}, {xmm_m128});");
+            }
+            /*
+            [FixedReg(dst), Imm(_)] => {
+
+                // TODO: don't emit VEX byte here.
+                fmtln!(f, "let {dst} = {};", dst.generate_fixed_reg().unwrap());
+                assert_eq!(vex.digit, None, "we expect no digit for operands: [FixedReg, Imm]");
+                fmtln!(f, "let digit = 0;");
+                fmtln!(f, "vex.emit_two_op(buf, digit, {dst}.enc());");
+
+            }
+            [RegMem(dst), Imm(_)] => {
+
+                let digit = vex
+                    .digit
+                    .expect("vex digit must be set for operands: [RegMem, Imm]");
+                fmtln!(f, "let digit = 0x{digit:x};");
+                f.add_block(&format!("match &self.{dst}"), |f| {
+                    fmtln!(f, "GprMem::Gpr({dst}) => vex.emit_two_op(buf, digit, {dst}.enc()),");
+                    fmtln!(f, "GprMem::Mem({dst}) => {dst}.emit_vex_prefix(vex, digit, buf),");
+                });
+
+            }
+            [Reg(dst), RegMem(src)] => {
+                fmtln!(f, "let {dst} = self.{dst}.enc();");
+                f.add_block(&format!("match &self.{src}"), |f| {
+                    match dst.bits() {
+                        128 => {
+                            fmtln!(f, "XmmMem::Xmm({src}) => vex.emit_two_op(buf, {dst}, {src}.enc()),");
+                            fmtln!(f, "XmmMem::Mem({src}) => {src}.emit_vex_prefix(vex, {dst}, buf),");
+                        }
+                        _ => {
+                            fmtln!(f, "GprMem::Gpr({src}) => vex.emit_two_op(buf, {dst}, {src}.enc()),");
+                            fmtln!(f, "GprMem::Mem({src}) => {src}.emit_vex_prefix(vex, {dst}, buf),");
+                        }
+                    };
+                });
+            }
+            [RegMem(dst), Reg(src)]
+            | [RegMem(dst), Reg(src), Imm(_)]
+            | [RegMem(dst), Reg(src), FixedReg(_)] => {
+                fmtln!(f, "let {src} = self.{src}.enc();");
+                f.add_block(&format!("match &self.{dst}"), |f| match src.bits() {
+                    128 => {
+                        fmtln!(f, "XmmMem::Xmm({dst}) => vex.emit_two_op(buf, {src}, {dst}.enc()),");
+                        fmtln!(f, "XmmMem::Mem({dst}) => {dst}.emit_vex_prefix(vex, {src}, buf),");
+                    }
+                    _ => {
+                        fmtln!(f, "GprMem::Gpr({dst}) => vex.emit_two_op(buf, {src}, {dst}.enc()),");
+                        fmtln!(f, "GprMem::Mem({dst}) => {dst}.emit_vex_prefix(vex, {src}, buf),");
+                    }
+                });
+
+            }
+            */
             unknown => unimplemented!("unknown pattern: {unknown:?}"),
         }
     }
