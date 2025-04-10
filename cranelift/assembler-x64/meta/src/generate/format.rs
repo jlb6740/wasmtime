@@ -34,10 +34,10 @@ impl dsl::Format {
 
     pub fn generate_vex_encoding(&self, f: &mut Formatter, vex: &dsl::Vex) {
         //self.generate_prefix(f, vex);
-        self.generate_vex_prefix(f, vex);
+        self.generate_vex(f, vex);
         //self.generate_opcodes(f, vex);
         //self.generate_modrm_byte(f, vex);
-        self.generate_immediate(f);
+        //self.generate_immediate(f);
     }
 
     /// `buf.put1(...);`
@@ -146,25 +146,43 @@ impl dsl::Format {
         }
     }
 
-    fn generate_vex_prefix(&self, f: &mut Formatter, vex: &dsl::Vex) {
+    fn generate_vex(&self, f: &mut Formatter, vex: &dsl::Vex) {
         use dsl::OperandKind::{FixedReg, Imm, Reg, RegMem};
         f.empty_line();
         f.comment("Emit VEX prefix.");
 
         // Create a vex struct
-        fmtln!(f, "let mut vex = new_vex({});", vex.opcodes.primary);
+        fmtln!(f, "let mut vex = new_vex({:0x});", vex.opcodes.primary);
 
         // 2/3 byte prefix
         //if b_bit(vex) && x_bit(vex) {
         if false {
             fmtln!(f, "// 2 byte prefix");
             //fmtln!(f, "buf.put1(0xC5);");
-            fmtln!(f, "encode_2byte_prefix(&vex, buf)");
+            fmtln!(f, "encode_2byte_prefix(&vex, buf);");
         } else {
             fmtln!(f, "// 3 byte prefix");
-            fmtln!(f, "encode_3byte_prefix(&vex, buf)");
+            fmtln!(f, "encode_3byte_prefix(&vex, buf);");
             //fmtln!(f, "buf.put1(0xC4);");
             //fmtln!(f, "vex.encode_3byte_prefix");
+        }
+
+        f.comment("Emit VEX opcode.");
+        fmtln!(f, "buf.put1({:0x});", vex.opcodes.primary);
+
+        //use dsl::OperandKind::{FixedReg, Imm, Reg, RegMem};
+
+        f.comment("Emit ModR/M byte.");
+
+        if let [FixedReg(_), Imm(_)] = self.operands_by_kind().as_slice() {
+            // No need to emit a comment.
+        } else {
+            f.empty_line();
+        }
+
+        match self.operands_by_kind().as_slice() {
+            [Reg(xmm1), Reg(xmm2), RegMem(xmm_m128)] => {}
+            unknown => unimplemented!("unknown pattern: {unknown:?}"),
         }
 
         /*
