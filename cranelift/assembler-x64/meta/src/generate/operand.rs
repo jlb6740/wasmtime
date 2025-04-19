@@ -86,8 +86,7 @@ impl dsl::Location {
             al | ax | eax | rax => Some("gpr::enc::RAX"),
             cl => Some("gpr::enc::RCX"),
             imm8 | imm16 | imm32 | r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 | rm128 | m8 | m16 | m32 | m64
-            | xmm1 | xmm2 | xmm3 | ymm1 | ymm2 | ymm3 | zmm1 | zmm2 | zmm3 | xmm_m128 | ymm_m256 | zmm_m512 | rm8
-            | rm16 | rm32 | rm64 | rm128 => None,
+            | xmm1 | xmm2 | xmm3 | ymm1 | ymm2 | ymm3 | zmm1 | zmm2 | zmm3 | xmm_m128 | ymm_m256 | zmm_m512 => None,
         }
     }
 }

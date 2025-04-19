@@ -8,8 +8,10 @@ mod encoding;
 mod features;
 pub mod format;
 
-pub use encoding::{rex, vex, Encoding, LegacyPrefix, OpcodeMap, Rex, Vex, VexLength, VexMMMMM, VexPP};
-pub use encoding::{Encoding, Group1Prefix, Group2Prefix, Group3Prefix, Group4Prefix, Opcodes, Prefixes, Rex};
+pub use encoding::{
+    rex, vex, Encoding, Group1Prefix, Group2Prefix, Group3Prefix, Group4Prefix, OpcodeMap, Opcodes, Prefixes, Rex, Vex,
+    VexLength, VexMMMMM, VexPP,
+};
 pub use features::{Feature, Features, ALL_FEATURES};
 pub use format::{align, fmt, r, rw, sxl, sxq, sxw, w};
 pub use format::{Extension, Format, Location, Mutability, Operand, OperandKind};

@@ -39,7 +39,7 @@ pub fn rex(opcode: impl Into<Opcodes>) -> Rex {
 #[must_use]
 pub fn vex(opcode: impl Into<Opcodes>) -> Vex {
     Vex {
-        prefix: LegacyPrefix::NoPrefix,
+        //prefix: LegacyPrefix::NoPrefix,
         map: OpcodeMap::None,
         opcodes: opcode.into(),
         w: false,
@@ -406,16 +406,22 @@ impl Prefixes {
     pub fn is_empty(&self) -> bool {
         self.group1.is_none() && self.group2.is_none() && self.group3.is_none() && self.group4.is_none()
     }
-    /// Emit the legacy prefix as bits (e.g. for EVEX instructions).
-    #[inline(always)]
+
     pub fn bits(&self) -> u8 {
-        match self {
-            Self::NoPrefix => 0b00,
-            Self::_66 => 0b01,
-            Self::_F3 => 0b10,
-            Self::_F2 => 0b11,
-            _ => panic!("VEX and EVEX bits can only be extracted from single prefixes: None, 66, F3, F2"),
+        let mut bits = 0;
+        if self.group1.is_some() {
+            bits |= 0b0001;
         }
+        if self.group2.is_some() {
+            bits |= 0b0010;
+        }
+        if self.group3.is_some() {
+            bits |= 0b0100;
+        }
+        if self.group4.is_some() {
+            bits |= 0b1000;
+        }
+        bits
     }
 }
 
@@ -618,7 +624,7 @@ impl fmt::Display for Imm {
 
 pub struct Vex {
     //pub length: VexVectorLength,
-    pub prefix: LegacyPrefix,
+    //pub prefix: LegacyPrefix,
     pub map: OpcodeMap,
     pub opcodes: Opcodes,
     pub w: bool,
@@ -653,7 +659,7 @@ pub enum VexMMMMM {
     /// Operand size override -- here, denoting "16-bit operation".
     _OF3A,
     /// The lock prefix.
-    _OF3B,
+    _OF38,
 }
 
 pub enum VexLength {

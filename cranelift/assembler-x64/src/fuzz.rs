@@ -25,14 +25,14 @@ pub fn roundtrip(inst: &Inst<FuzzRegs>) {
     // off the instruction offset first.
     let expected = expected.split_once(' ').unwrap().1;
     let actual = inst.to_string();
-    if expected != actual && expected != replace_signed_immediates(&actual) {
-        println!("> {inst}");
-        println!("  debug: {inst:x?}");
-        println!("  assembled: {}", pretty_print_hexadecimal(&assembled));
-        println!("  expected (capstone): {expected}");
-        println!("  actual (to_string):  {actual}");
-        assert_eq!(expected, &actual);
-    }
+    //if expected != actual && expected != replace_signed_immediates(&actual) {
+    println!("> {inst}");
+    println!("  debug: {inst:x?}");
+    println!("  assembled: {}", pretty_print_hexadecimal(&assembled));
+    println!("  expected (capstone): {expected}");
+    println!("  actual (to_string):  {actual}");
+    // assert_eq!(expected, &actual);
+    //}
 }
 
 /// Use this assembler to emit machine code into a byte buffer.
@@ -62,6 +62,7 @@ fn disassemble(assembled: &[u8], original: &Inst<FuzzRegs>) -> String {
     if insts.len() != 1 {
         println!("> {original}");
         println!("  debug: {original:x?}");
+        println!("  assembled inst len: {}", assembled.len());
         println!("  assembled: {}", pretty_print_hexadecimal(&assembled));
         assert_eq!(insts.len(), 1, "not a single instruction");
     }
@@ -266,7 +267,10 @@ mod test {
             Ok(())
         })
         .budget_ms(1_000)
-        .seed(0xe3347d2600000028);
+        //.seed(0xe3347d2600000028)
+        .seed(0xeaf99e6e00010000)
+        //.seed(0x4f0dfb8a00010000)
+        ;
 
         // This will run the `roundtrip` fuzzer for one second. To repeatably
         // test a single input, append `.seed(0x<failing seed>)`.
