@@ -156,9 +156,9 @@ impl dsl::Format {
         fmtln!(f, "let mut vex = vex.opcode(0x{:0x});", vex2.opcodes.primary);
         //fmtln!(f, "vex.rm = XmmMem(16);");
         fmtln!(f, "println!(\"Here **********\");");
-        fmtln!(f, "println!(\"xmm1: {{:?}}\",self.xmm1);");
-        fmtln!(f, "println!(\"xmm2: {{:?}}\",self.xmm2);");
-        fmtln!(f, "println!(\"xmm_m128: {{:?}}\",self.xmm_m128);");
+        //fmtln!(f, "println!(\"xmm1: {{:?}}\",self.xmm1);");
+        //fmtln!(f, "println!(\"xmm2: {{:?}}\",self.xmm2);");
+        //fmtln!(f, "println!(\"xmm_m128: {{:?}}\",self.xmm_m128);");
         fmtln!(f, "vex.reg = self.xmm1.enc();");
         fmtln!(f, "match &self.xmm_m128 {{");
         //fmtln!(f, "XmmMem::Xmm(R) => {{vex.rm = XmmMem::Xmm(32);}}");

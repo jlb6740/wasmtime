@@ -1,7 +1,8 @@
 //! Defines x64 instructions using the DSL.
 
 mod add;
-mod add_s;
+mod addpd;
+mod addps;
 mod and;
 mod or;
 mod shld;
@@ -19,6 +20,7 @@ pub fn list() -> Vec<Inst> {
     all.extend(shld::list());
     all.extend(sub::list());
     all.extend(xor::list());
-    all.extend(add_s::list());
+    all.extend(addpd::list());
+    all.extend(addps::list());
     all
 }
