@@ -653,6 +653,17 @@ pub enum VexPP {
     _F2,
 }
 
+impl fmt::Display for VexPP {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            VexPP::None => write!(f, ""),
+            VexPP::_66 => write!(f, "_66"),
+            VexPP::_F3 => write!(f, "_F3"),
+            VexPP::_F2 => write!(f, "_F2"),
+        }
+    }
+}
+
 #[derive(PartialEq)]
 pub enum VexMMMMM {
     _OF,
@@ -660,6 +671,16 @@ pub enum VexMMMMM {
     _OF3A,
     /// The lock prefix.
     _OF38,
+}
+
+impl fmt::Display for VexMMMMM {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            VexMMMMM::_OF => write!(f, "_0F"),
+            VexMMMMM::_OF3A => write!(f, "_3A"),
+            VexMMMMM::_OF38 => write!(f, "_38"),
+        }
+    }
 }
 
 pub enum VexLength {

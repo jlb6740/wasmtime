@@ -3,8 +3,6 @@
 
 //use core::fmt;
 
-use core::fmt;
-
 use super::{fmtln, Formatter};
 use crate::dsl;
 
@@ -172,13 +170,16 @@ impl dsl::Format {
         //fmtln!(f, "XmmMem::Mem(m) => unimplemented!(\"MEM\"),");
         //fmtln!(f, "XmmMem::Mem(Amode<M>) => unimplemented!(\"MEM\"),");
         fmtln!(f, "}}");
+
         fmtln!(f, "vex.vvvv = Some(self.xmm2.enc());");
-        fmtln!(f, "vex.map = OpcodeMap::_0F;");
+        fmtln!(f, "vex.prefix = LegacyPrefix::{};", vex2.pp.to_string());
+        fmtln!(f, "vex.map = OpcodeMap::{};", vex2.mmmmm.to_string());
+        //fmtln!(f, "vex.map = OpcodeMap::_0F;");
 
         //fmtln!(f, "vex.rm = XmmMem::Xmm(self.xmm_m128.Xmm);");
 
         //fmtln!(f, "println!(\"VEX: {{:0x}}, {{:0x}}, {{:0x}}, {{:0x}}, {{:0x}}, {{:0x}}, {{:0x}})\", vex.opcodes.primary, vex.opcodes.secondary, vex.opcodes.length, vex.opcodes.mmmmmm, vex.opcodes.pp, vex.opcodes.vvvv, vex.opcodes.bbb);");
-        fmtln!(f, "vex.encode(buf);");
+        fmtln!(f, "vex.encode(buf, off);");
 
         // Create a vex struct
         //fmtln!(f, "let mut vex = new_vex({:0x});", vex.opcodes.primary);
