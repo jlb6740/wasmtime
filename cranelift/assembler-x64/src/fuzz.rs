@@ -269,7 +269,8 @@ mod test {
         .budget_ms(1_000)
         //.seed(0xe3347d2600000028)
         //.seed(0xeaf99e6e00010000)
-        .seed(0x4f0dfb8a00010000);
+        //.seed(0x4f0dfb8a00010000)
+        ;
 
         // This will run the `roundtrip` fuzzer for one second. To repeatably
         // test a single0 input, append `.seed(0x<failing seed>)`.

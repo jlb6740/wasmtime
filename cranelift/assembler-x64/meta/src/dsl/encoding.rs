@@ -50,7 +50,7 @@ pub fn vex(opcode: impl Into<Opcodes>) -> Vex {
         wig: false,
         rxb: 0,
         length: VexLength::default(),
-        mmmmm: VexMMMMM::_OF,
+        mmmmm: VexMMMMM::None,
         pp: VexPP::None,
         reg: 0x00,
         //rm: RegisterOrAmode::Register(0.into()),
@@ -656,7 +656,7 @@ pub enum VexPP {
 impl fmt::Display for VexPP {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            VexPP::None => write!(f, ""),
+            VexPP::None => write!(f, "None"),
             VexPP::_66 => write!(f, "_66"),
             VexPP::_F3 => write!(f, "_F3"),
             VexPP::_F2 => write!(f, "_F2"),
@@ -666,6 +666,7 @@ impl fmt::Display for VexPP {
 
 #[derive(PartialEq)]
 pub enum VexMMMMM {
+    None,
     _OF,
     /// Operand size override -- here, denoting "16-bit operation".
     _OF3A,
@@ -676,9 +677,10 @@ pub enum VexMMMMM {
 impl fmt::Display for VexMMMMM {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            VexMMMMM::None => write!(f, "None"),
             VexMMMMM::_OF => write!(f, "_0F"),
-            VexMMMMM::_OF3A => write!(f, "_3A"),
-            VexMMMMM::_OF38 => write!(f, "_38"),
+            VexMMMMM::_OF3A => write!(f, "_OF3A"),
+            VexMMMMM::_OF38 => write!(f, "_OF38"),
         }
     }
 }

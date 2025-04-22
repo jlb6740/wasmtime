@@ -152,7 +152,7 @@ impl dsl::Format {
         f.empty_line();
         f.comment("Emit VEX prefix.");
         //fmtln!(f, "let mut vex: VexInstruction<Registers> = VexInstruction::default();");
-        fmtln!(f, "let mut vex: VexInstruction<R> = VexInstruction::default();");
+        fmtln!(f, "let vex: VexInstruction<R> = VexInstruction::default();");
         fmtln!(f, "let mut vex = vex.opcode(0x{:0x});", vex2.opcodes.primary);
         //fmtln!(f, "vex.rm = XmmMem(16);");
         fmtln!(f, "println!(\"Here **********\");");
@@ -172,6 +172,7 @@ impl dsl::Format {
         fmtln!(f, "}}");
 
         fmtln!(f, "vex.vvvv = Some(self.xmm2.enc());");
+
         fmtln!(f, "vex.prefix = LegacyPrefix::{};", vex2.pp.to_string());
         fmtln!(f, "vex.map = OpcodeMap::{};", vex2.mmmmm.to_string());
         //fmtln!(f, "vex.map = OpcodeMap::_0F;");
