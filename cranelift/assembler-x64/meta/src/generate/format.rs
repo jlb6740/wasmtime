@@ -35,11 +35,7 @@ impl dsl::Format {
     }
 
     pub fn generate_vex_encoding(&self, f: &mut Formatter, vex: &dsl::Vex) {
-        //self.generate_prefix(f, vex);
         self.generate_vex(f, vex);
-        //self.generate_opcodes(f, vex);
-        //self.generate_modrm_byte(f, vex);
-        //self.generate_immediate(f);
     }
 
     /// `buf.put1(...);`
@@ -151,39 +147,19 @@ impl dsl::Format {
     fn generate_vex(&self, f: &mut Formatter, vex2: &dsl::Vex) {
         f.empty_line();
         f.comment("Emit VEX prefix.");
-        //fmtln!(f, "let mut vex: VexInstruction<Registers> = VexInstruction::default();");
         fmtln!(f, "let vex: VexInstruction<R> = VexInstruction::default();");
         fmtln!(f, "let mut vex = vex.opcode(0x{:0x});", vex2.opcodes.primary);
-        //fmtln!(f, "vex.rm = XmmMem(16);");
-        fmtln!(f, "println!(\"Here **********\");");
-        //fmtln!(f, "println!(\"xmm1: {{:?}}\",self.xmm1);");
-        //fmtln!(f, "println!(\"xmm2: {{:?}}\",self.xmm2);");
-        //fmtln!(f, "println!(\"xmm_m128: {{:?}}\",self.xmm_m128);");
         fmtln!(f, "vex.reg = self.xmm1.enc();");
         fmtln!(f, "match &self.xmm_m128 {{");
-        //fmtln!(f, "XmmMem::Xmm(R) => {{vex.rm = XmmMem::Xmm(32);}}");
-        //fmtln!(f, "XmmMem::Xmm(R) => {{vex.rm = R.enc();}}");
-        //fmtln!(f, "XmmMem::Xmm(R) => {{vex.rm = XmmMem::Xmm(R.enc());}}");
-        //fmtln!(f, "XmmMem::Xmm(r) => {{vex.rm = XmmMem::Xmm(r);}}");
         fmtln!(f, "XmmMem::Xmm(r) => {{vex.rm =  XmmMem::Xmm(r.clone());}}");
         fmtln!(f, "XmmMem::Mem(m) => {{vex.rm =  XmmMem::Mem(m.clone());}}");
-        //fmtln!(f, "XmmMem::Mem(m) => unimplemented!(\"MEM\"),");
-        //fmtln!(f, "XmmMem::Mem(Amode<M>) => unimplemented!(\"MEM\"),");
         fmtln!(f, "}}");
 
         fmtln!(f, "vex.vvvv = Some(self.xmm2.enc());");
 
         fmtln!(f, "vex.prefix = LegacyPrefix::{};", vex2.pp.to_string());
         fmtln!(f, "vex.map = OpcodeMap::{};", vex2.mmmmm.to_string());
-        //fmtln!(f, "vex.map = OpcodeMap::_0F;");
-
-        //fmtln!(f, "vex.rm = XmmMem::Xmm(self.xmm_m128.Xmm);");
-
-        //fmtln!(f, "println!(\"VEX: {{:0x}}, {{:0x}}, {{:0x}}, {{:0x}}, {{:0x}}, {{:0x}}, {{:0x}})\", vex.opcodes.primary, vex.opcodes.secondary, vex.opcodes.length, vex.opcodes.mmmmmm, vex.opcodes.pp, vex.opcodes.vvvv, vex.opcodes.bbb);");
         fmtln!(f, "vex.encode(buf, off);");
-
-        // Create a vex struct
-        //fmtln!(f, "let mut vex = new_vex({:0x});", vex.opcodes.primary);
     }
 
     fn generate_modrm_byte(&self, f: &mut Formatter, rex: &dsl::Rex) {
