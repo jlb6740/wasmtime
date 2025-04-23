@@ -16,6 +16,7 @@ impl asm::Registers for CraneliftRegisters {
     type ReadWriteGpr = PairedGpr;
     type ReadXmm = Xmm;
     type ReadWriteXmm = PairedXmm;
+    type WriteXmm = Xmm;
 }
 
 /// A pair of registers, one for reading and one for writing.
@@ -190,6 +191,16 @@ impl<'a, T: OperandVisitor> asm::RegisterVisitor<CraneliftRegisters> for Regallo
 
     fn fixed_read_write_xmm(&mut self, _reg: &PairedXmm) {
         todo!()
+    }
+
+    fn write_xmm(&mut self, reg: &mut Xmm) {
+        todo!()
+        //self.collector.reg_reuse_def(reg, 0);
+    }
+
+    fn fixed_write_xmm(&mut self, reg: &Xmm) {
+        todo!()
+        //self.collector.reg_reuse_def(reg, 0);
     }
 }
 

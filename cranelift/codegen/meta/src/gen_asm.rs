@@ -88,7 +88,7 @@ pub fn generate_macro_inst_fn(f: &mut Formatter, inst: &Inst) {
         .format
         .operands
         .iter()
-        .filter(|o| o.mutability.is_read())
+        //.filter(|o| o.mutability.is_read())
         // FIXME(#10238) don't filter out fixed regs here
         .filter(|o| !matches!(o.location.kind(), OperandKind::FixedReg(_)))
         .collect::<Vec<_>>();
@@ -132,12 +132,12 @@ pub fn generate_macro_inst_fn(f: &mut Formatter, inst: &Inst) {
                 [] => fmtln!(f, "SideEffectNoResult::Inst(inst)"),
                 [one] => match one.mutability {
                     Read => unreachable!(),
-                    ReadWrite => match one.location.kind() {
+                    ReadWrite | Write => match one.location.kind() {
                         OperandKind::Imm(_) => unreachable!(),
                         // FIXME(#10238)
                         OperandKind::FixedReg(_) => fmtln!(f, "todo!()"),
                         // One read/write register output? Output the instruction
-                        // and that register.
+                        // and that register./
                         OperandKind::Reg(r) => {
                             let (var, ty) = match r.bits() {
                                 128 => ("xmm", "Xmm"),
@@ -173,7 +173,7 @@ pub fn generate_macro_inst_fn(f: &mut Formatter, inst: &Inst) {
                             });
                         }
                     },
-                    Write => todo!(),
+                    //Write => todo!(),
                 },
                 _ => panic!("instruction has more than one result"),
             }
@@ -322,7 +322,7 @@ pub fn isle_constructors(format: &Format) -> Vec<IsleConstructor> {
             [] => unimplemented!("if you truly need this (and not a `SideEffect*`), add a `NoReturn` variant to `AssemblerOutputs`"),
             [one] => match one.mutability {
                 Read => unreachable!(),
-                ReadWrite => match one.location.kind() {
+                ReadWrite | Write => match one.location.kind() {
                     Imm(_) => unreachable!(),
                     FixedReg(_) => vec![IsleConstructor::RetGpr],
                     // One read/write register output? Output the instruction
@@ -340,7 +340,7 @@ pub fn isle_constructors(format: &Format) -> Vec<IsleConstructor> {
                         _ => vec![IsleConstructor::RetGpr, IsleConstructor::RetMemorySideEffect],
                     },
                 },
-                Write => todo!(),
+                //Write => todo!(),
             },
             other => panic!("unsupported number of write operands {other:?}"),
         }
