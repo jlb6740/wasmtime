@@ -308,7 +308,6 @@ pub fn isle_constructors(format: &Format) -> Vec<IsleConstructor> {
                         _ => vec![IsleConstructor::RetGpr, IsleConstructor::RetMemorySideEffect],
                     },
                 },
-                //Write => todo!(),
             },
             other => panic!("unsupported number of write operands {other:?}"),
         }
