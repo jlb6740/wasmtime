@@ -1,4 +1,4 @@
-use crate::dsl::{align, fmt, inst, r, rex, rw, sxl, sxq};
+use crate::dsl::{fmt, inst, r, rex, rw, sxl, sxq};
 use crate::dsl::{Feature::*, Inst, Location::*};
 
 pub fn list() -> Vec<Inst> {

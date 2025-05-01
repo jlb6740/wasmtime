@@ -70,12 +70,6 @@ impl LegacyPrefix {
     }
 }
 
-impl Default for LegacyPrefix {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
 pub struct VexInstruction<R: Registers> {
     pub length: VexVectorLength,
     pub prefix: LegacyPrefix,
@@ -86,6 +80,20 @@ pub struct VexInstruction<R: Registers> {
     pub rm: XmmMem<R::ReadXmm, R::ReadGpr>,
     pub vvvv: Option<u8>,
     pub imm: Option<u8>,
+}
+
+pub fn vex_instruction<R: Registers>(opcode: u8) -> VexInstruction<R> {
+    VexInstruction {
+        opcode: opcode,
+        length: VexVectorLength::default(),
+        prefix: LegacyPrefix::None,
+        map: OpcodeMap::None,
+        w: false,
+        reg: 0,
+        rm: XmmMem::default(),
+        vvvv: None,
+        imm: None,
+    }
 }
 
 impl<R: Registers> Default for VexInstruction<R> {

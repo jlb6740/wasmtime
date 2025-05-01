@@ -311,7 +311,7 @@ impl Location {
     /// Return the number of bytes accessed, for convenience.
     #[must_use]
     pub fn bytes(&self) -> u16 {
-        self.bits() / 16
+        self.bits() / 8
     }
 
     /// Return `true` if the location accesses memory; `false` otherwise.

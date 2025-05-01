@@ -143,13 +143,14 @@ impl dsl::Format {
     fn generate_vex(&self, f: &mut Formatter, vex: &dsl::Vex) {
         f.empty_line();
         f.comment("Emit VEX prefix.");
-        fmtln!(f, "let vex: VexInstruction<R> = VexInstruction::default();");
-        fmtln!(f, "let mut vex = vex.opcode(0x{:0x});", vex.opcodes.primary);
+        //fmtln!(f, "let vex: VexInstruction<R> = VexInstruction::default();");
+        //fmtln!(f, "let mut vex: VexInstruction<R> = vex.opcode(0x{:0x});", vex.opcodes.primary);
+        fmtln!(f, "let mut vex: VexInstruction<R> = vex_instruction(0x{:0x});", vex.opcodes.primary);
         fmtln!(f, "vex.reg = self.xmm1.enc();");
-        fmtln!(f, "match &self.xmm_m128 {{");
-        fmtln!(f, "XmmMem::Xmm(r) => {{vex.rm =  XmmMem::Xmm(r.clone());}}");
-        fmtln!(f, "XmmMem::Mem(m) => {{vex.rm =  XmmMem::Mem(m.clone());}}");
-        fmtln!(f, "}}");
+        f.add_block("match &self.xmm_m128", |f| {
+            fmtln!(f, "XmmMem::Xmm(r) => {{vex.rm =  XmmMem::Xmm(r.clone());}}");
+            fmtln!(f, "XmmMem::Mem(m) => {{vex.rm =  XmmMem::Mem(m.clone());}}");
+        });
         fmtln!(f, "vex.vvvv = Some(self.xmm2.enc());");
         fmtln!(f, "vex.prefix = LegacyPrefix::{};", vex.pp.to_string());
         fmtln!(f, "vex.map = OpcodeMap::{};", vex.mmmmm.to_string());
