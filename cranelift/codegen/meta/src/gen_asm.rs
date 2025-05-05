@@ -47,13 +47,16 @@ pub fn rust_convert_isle_to_assembler(op: &Operand) -> String {
                 Mutability::ReadWrite => {
                     format!("self.convert_{reg}_to_assembler_fixed_read_write_{reg}")
                 }
+                Mutability::Write => unimplemented!(),
             }
         }
         OperandKind::Reg(r) => {
             let reg = r.reg_class().unwrap();
             let reg_lower = reg.to_string().to_lowercase();
             match op.mutability {
-                Mutability::Read => format!("cranelift_assembler_x64::{reg}::new"),
+                Mutability::Read | Mutability::Write => {
+                    format!("cranelift_assembler_x64::{reg}::new")
+                }
                 Mutability::ReadWrite => {
                     format!("self.convert_{reg_lower}_to_assembler_read_write_{reg_lower}")
                 }
@@ -80,7 +83,7 @@ pub fn generate_macro_inst_fn(f: &mut Formatter, inst: &Inst) {
         .format
         .operands
         .iter()
-        .filter(|o| o.mutability.is_read())
+        //.filter(|o| o.mutability.is_read())
         .collect::<Vec<_>>();
     let results = inst
         .format
@@ -352,7 +355,7 @@ pub fn generate_isle_inst_decls(f: &mut Formatter, inst: &Inst) {
         .format
         .operands
         .iter()
-        .filter(|o| o.mutability.is_read())
+        //.filter(|o| o.mutability.is_read())
         .collect::<Vec<_>>();
     let raw_param_tys = params
         .iter()
