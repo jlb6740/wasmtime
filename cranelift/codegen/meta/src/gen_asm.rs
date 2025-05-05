@@ -120,7 +120,7 @@ pub fn generate_macro_inst_fn(f: &mut Formatter, inst: &Inst) {
                 [] => fmtln!(f, "SideEffectNoResult::Inst(inst)"),
                 [one] => match one.mutability {
                     Read => unreachable!(),
-                    ReadWrite | Write => match one.location.kind() {
+                    ReadWrite => match one.location.kind() {
                         OperandKind::Imm(_) => unreachable!(),
                         // One read/write register output? Output the instruction
                         // and that register.
@@ -152,7 +152,15 @@ pub fn generate_macro_inst_fn(f: &mut Formatter, inst: &Inst) {
                             });
                         }
                     },
-                    //Write => todo!(),
+                    Write => match one.location.kind() {
+                        OperandKind::Reg(r) => {
+                            let ty = r.reg_class().unwrap().to_string();
+                            let var = ty.to_lowercase();
+                            fmtln!(f, "let {var} = {r}.as_ref().clone();");
+                            fmtln!(f, "AssemblerOutputs::Ret{ty} {{ inst, {var} }}");
+                        }
+                        _ => unimplemented!(),
+                    },
                 },
                 _ => panic!("instruction has more than one result"),
             }

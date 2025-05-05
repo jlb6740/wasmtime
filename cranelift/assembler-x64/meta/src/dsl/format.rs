@@ -268,15 +268,6 @@ pub enum Location {
     rm64,
 
     // XMM registers, and their memory forms.
-    xmm_m32,
-    xmm_m64,
-    xmm_m128,
-
-    // Memory-only locations.
-    m8,
-    m16,
-    m32,
-    m64,
     xmm1,
     xmm2,
     xmm3,
@@ -286,10 +277,17 @@ pub enum Location {
     zmm1,
     zmm2,
     zmm3,
-
+    xmm_m32,
+    xmm_m64,
     xmm_m128,
     ymm_m256,
     zmm_m512,
+
+    // Memory-only locations.
+    m8,
+    m16,
+    m32,
+    m64,
 }
 
 impl Location {
@@ -334,9 +332,9 @@ impl Location {
         use Location::*;
         match self {
             cl | imm8 | imm16 | imm32 => false,
-            al | ax | eax | rax | r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 | rm128 | m8 | m16 | m32 | m64
-            | xmm1 | xmm2 | xmm3 | xmm_m32 | xmm_m64 | ymm1 | ymm2 | ymm3 | zmm1 | zmm2 | zmm3 | xmm_m128
-            | ymm_m256 | zmm_m512 => true,
+            al | ax | eax | rax | r8 | r16 | r32 | r64 | rm8 | rm16 | rm32 | rm64 | m8 | m16 | m32 | m64 | xmm1
+            | xmm2 | xmm3 | xmm_m32 | xmm_m64 | ymm1 | ymm2 | ymm3 | zmm1 | zmm2 | zmm3 | xmm_m128 | ymm_m256
+            | zmm_m512 => true,
         }
     }
 
@@ -394,10 +392,11 @@ impl core::fmt::Display for Location {
             rm32 => write!(f, "rm32"),
             rm64 => write!(f, "rm64"),
 
-            xmm => write!(f, "xmm"),
             xmm_m32 => write!(f, "xmm_m32"),
             xmm_m64 => write!(f, "xmm_m64"),
             xmm_m128 => write!(f, "xmm_m128"),
+            ymm_m256 => write!(f, "ymm_m256"),
+            zmm_m512 => write!(f, "zmm_m512"),
 
             m8 => write!(f, "m8"),
             m16 => write!(f, "m16"),
@@ -414,10 +413,6 @@ impl core::fmt::Display for Location {
             zmm1 => write!(f, "zmm1"),
             zmm2 => write!(f, "zmm2"),
             zmm3 => write!(f, "zmm3"),
-
-            xmm_m128 => write!(f, "xmm_m128"),
-            ymm_m256 => write!(f, "ymm_m256"),
-            zmm_m512 => write!(f, "zmm_m512"),
         }
     }
 }

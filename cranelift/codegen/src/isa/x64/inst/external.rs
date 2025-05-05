@@ -325,11 +325,12 @@ impl<'a, T: OperandVisitor> asm::RegisterVisitor<CraneliftRegisters> for Regallo
             .reg_fixed_def(write, fixed_reg(enc, RegClass::Float));
     }
 
-    fn write_xmm(&mut self, _reg: &mut Xmm) {
-        todo!()
+    fn write_xmm(&mut self, reg: &mut Xmm) {
+        let mut reg = Writable::from_reg(reg);
+        self.collector.reg_def(&mut reg);
     }
 
-    fn fixed_write_xmm(&mut self, _reg: &mut Xmm, _enc: u8) {
+    fn fixed_write_xmm(&mut self, reg: &mut Xmm, enc: u8) {
         todo!()
     }
 }
