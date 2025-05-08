@@ -77,7 +77,8 @@ pub struct VexInstruction<R: Registers> {
     pub opcode: u8,
     pub w: bool,
     pub reg: u8,
-    pub rm: XmmMem<R::ReadXmm, R::ReadGpr>,
+    //pub rm: XmmMem<R::ReadXmm, R::ReadGpr>,
+    pub rm: Option<XmmMem<R::ReadXmm, R::ReadGpr>>,
     pub vvvv: Option<u8>,
     pub imm: Option<u8>,
 }
@@ -90,25 +91,9 @@ pub fn vex_instruction<R: Registers>(opcode: u8) -> VexInstruction<R> {
         map: OpcodeMap::None,
         w: false,
         reg: 0,
-        rm: XmmMem::default(),
+        rm: None,
         vvvv: None,
         imm: None,
-    }
-}
-
-impl<R: Registers> Default for VexInstruction<R> {
-    fn default() -> Self {
-        Self {
-            length: VexVectorLength::default(),
-            prefix: LegacyPrefix::None,
-            map: OpcodeMap::None,
-            opcode: 0x00,
-            w: false,
-            reg: 0x00,
-            rm: XmmMem::default(),
-            vvvv: None,
-            imm: None,
-        }
     }
 }
 
@@ -123,10 +108,11 @@ impl<R: Registers> VexInstruction<R> {
     #[inline(always)]
     fn x_bit(&self) -> u8 {
         let reg = match &self.rm {
-            XmmMem::Xmm(_xmm) => 0,
-            XmmMem::Mem(Amode::ImmReg { .. }) => 0,
-            XmmMem::Mem(Amode::ImmRegRegShift { index, .. }) => index.enc(),
-            XmmMem::Mem(Amode::RipRelative { .. }) => 0,
+            Some(XmmMem::Xmm(_xmm)) => 0,
+            Some(XmmMem::Mem(Amode::ImmReg { .. })) => 0,
+            Some(XmmMem::Mem(Amode::ImmRegRegShift { index, .. })) => index.enc(),
+            Some(XmmMem::Mem(Amode::RipRelative { .. })) => 0,
+            None => unreachable!("VEX encoding requires a valid rm operand"),
         };
 
         !(reg >> 3) & 1
@@ -136,10 +122,11 @@ impl<R: Registers> VexInstruction<R> {
     #[inline(always)]
     fn b_bit(&self) -> u8 {
         let reg = match &self.rm {
-            XmmMem::Xmm(xmm) => (*xmm).enc(),
-            XmmMem::Mem(Amode::ImmReg { base, .. }) => base.enc(),
-            XmmMem::Mem(Amode::ImmRegRegShift { base, .. }) => base.enc(),
-            XmmMem::Mem(Amode::RipRelative { .. }) => 0,
+            Some(XmmMem::Xmm(xmm)) => (*xmm).enc(),
+            Some(XmmMem::Mem(Amode::ImmReg { base, .. })) => base.enc(),
+            Some(XmmMem::Mem(Amode::ImmRegRegShift { base, .. })) => base.enc(),
+            Some(XmmMem::Mem(Amode::RipRelative { .. })) => 0,
+            None => unreachable!("VEX encoding requires a valid rm operand"),
         };
 
         !(reg >> 3) & 1
@@ -224,17 +211,18 @@ impl<R: Registers> VexInstruction<R> {
         match &self.rm {
             // Not all instructions use Reg as a reg, some use it as an extension
             // of the opcode.
-            XmmMem::Xmm(xmm) => {
+            Some(XmmMem::Xmm(xmm)) => {
                 let rm: u8 = (*xmm).enc();
                 sink.put1(rex::encode_modrm(3, self.reg & 7, rm & 7));
             }
             // For address-based modes reuse the logic from the `rex` module
             // for the modrm and trailing bytes since VEX uses the same
             // encoding.
-            XmmMem::Mem(amode) => {
+            Some(XmmMem::Mem(amode)) => {
                 let bytes_at_end = if self.imm.is_some() { 1 } else { 0 };
                 emit_modrm_sib_disp(sink, off, self.reg & 7, amode, bytes_at_end, None);
             }
+            None => unreachable!("VEX encoding requires a valid rm operand"),
         }
 
         // Optional 1 Byte imm

@@ -36,9 +36,6 @@ pub fn vex(opcode: impl Into<Opcodes>) -> Vex {
     Vex {
         opcodes: opcode.into(),
         w: false,
-        r: false,
-        x: false,
-        b: false,
         wig: false,
         length: VexLength::default(),
         mmmmm: VexMMMMM::None,
@@ -615,9 +612,6 @@ impl fmt::Display for Imm {
 pub struct Vex {
     pub opcodes: Opcodes,
     pub w: bool,
-    pub r: bool,
-    pub x: bool,
-    pub b: bool,
     pub wig: bool,
     pub length: VexLength,
     pub mmmmm: VexMMMMM,

@@ -148,8 +148,8 @@ impl dsl::Format {
         fmtln!(f, "let mut vex: VexInstruction<R> = vex_instruction(0x{:0x});", vex.opcodes.primary);
         fmtln!(f, "vex.reg = self.xmm1.enc();");
         f.add_block("match &self.xmm_m128", |f| {
-            fmtln!(f, "XmmMem::Xmm(r) => {{vex.rm =  XmmMem::Xmm(r.clone());}}");
-            fmtln!(f, "XmmMem::Mem(m) => {{vex.rm =  XmmMem::Mem(m.clone());}}");
+            fmtln!(f, "XmmMem::Xmm(r) => {{vex.rm =  Some(XmmMem::Xmm(r.clone()));}}");
+            fmtln!(f, "XmmMem::Mem(m) => {{vex.rm =  Some(XmmMem::Mem(m.clone()));}}");
         });
         fmtln!(f, "vex.vvvv = Some(self.xmm2.enc());");
         fmtln!(f, "vex.prefix = LegacyPrefix::{};", vex.pp.to_string());
