@@ -55,7 +55,6 @@ pub fn rust_convert_isle_to_assembler(op: &Operand) -> String {
                 Mutability::ReadWrite => {
                     format!("self.convert_{reg}_to_assembler_fixed_read_write_{reg}({r})")
                 }
-                Mutability::Write => unimplemented!(),
             }
         }
         OperandKind::Reg(r) => {
@@ -397,12 +396,7 @@ pub fn generate_isle_inst_decls(f: &mut Formatter, inst: &Inst) {
     // general lowering rules in ISLE.
     let struct_name = inst.name();
     let raw_name = format!("x64_{struct_name}_raw");
-    let params = inst
-        .format
-        .operands
-        .iter()
-        //.filter(|o| o.mutability.is_read())
-        .collect::<Vec<_>>();
+    let params = inst.format.operands.iter().collect::<Vec<_>>();
     let raw_param_tys = params
         .iter()
         .map(|o| isle_param_raw(o))
