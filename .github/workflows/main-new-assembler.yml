@@ -1,13 +1,13 @@
-name: CI
+name: CI-New-Assembler
 on:
   # Run CI for PRs to `main` and to release branches.
   #
   # Note that PRs to `main` will run a subset of tests and PRs to the
   # `release-*` branches will run full CI.
-  #pull_request:
-  #  branches:
-  #  - main
-  #  - 'release-*'
+  pull_request:
+    branches:
+    - main
+    - 'release-*'
 
   # This is the CI that runs for PRs-to-merge.
   merge_group:
