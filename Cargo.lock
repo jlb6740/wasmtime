@@ -692,6 +692,7 @@ dependencies = [
  "arbtest",
  "capstone",
  "cranelift-assembler-x64-meta",
+ "xed-sys",
 ]
 
 [[package]]
@@ -760,7 +761,7 @@ dependencies = [
  "similar",
  "smallvec 1.15.1",
  "souper-ir",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "wasmtime-internal-core",
 ]
 
@@ -821,7 +822,7 @@ dependencies = [
  "serde_derive",
  "similar",
  "smallvec 1.15.1",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "thiserror 2.0.17",
  "toml",
  "wasmtime-internal-unwinder",
@@ -838,7 +839,7 @@ dependencies = [
  "log",
  "similar",
  "smallvec 1.15.1",
- "target-lexicon",
+ "target-lexicon 0.13.5",
 ]
 
 [[package]]
@@ -850,7 +851,7 @@ dependencies = [
  "cranelift",
  "cranelift-native",
  "rand 0.10.1",
- "target-lexicon",
+ "target-lexicon 0.13.5",
 ]
 
 [[package]]
@@ -954,7 +955,7 @@ dependencies = [
  "log",
  "memmap2",
  "region",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "wasmtime-internal-jit-icache-coherence",
  "wasmtime-internal-unwinder",
  "windows-sys 0.61.2",
@@ -978,7 +979,7 @@ version = "0.135.0"
 dependencies = [
  "cranelift-codegen",
  "libc",
- "target-lexicon",
+ "target-lexicon 0.13.5",
 ]
 
 [[package]]
@@ -994,7 +995,7 @@ dependencies = [
  "gimli 0.33.0",
  "log",
  "object 0.39.0",
- "target-lexicon",
+ "target-lexicon 0.13.5",
 ]
 
 [[package]]
@@ -1004,7 +1005,7 @@ dependencies = [
  "anyhow",
  "cranelift-codegen",
  "smallvec 1.15.1",
- "target-lexicon",
+ "target-lexicon 0.13.5",
 ]
 
 [[package]]
@@ -1048,7 +1049,7 @@ dependencies = [
  "rustc-hash",
  "serde",
  "similar",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "thiserror 2.0.17",
  "toml",
  "walkdir",
@@ -3169,9 +3170,9 @@ dependencies = [
 
 [[package]]
 name = "regalloc2"
-version = "0.15.1"
+version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de2c52737737f8609e94f975dee22854a2d5c125772d4b1cf292120f4d45c186"
+checksum = "757712e8e61590d6d4f5d563483755538b5aa13467837a3b41cd9832509a7f85"
 dependencies = [
  "allocator-api2",
  "bumpalo",
@@ -3695,6 +3696,12 @@ dependencies = [
  "libc",
  "xattr",
 ]
+
+[[package]]
+name = "target-lexicon"
+version = "0.12.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "target-lexicon"
@@ -4627,7 +4634,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "smallvec 1.15.1",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "tempfile",
  "tokio",
  "wasm-compose",
@@ -4659,7 +4666,7 @@ version = "48.0.0"
 dependencies = [
  "clap",
  "shuffling-allocator",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "wasmtime",
  "wasmtime-cli-flags",
  "wasmtime-wasi",
@@ -4733,7 +4740,7 @@ dependencies = [
  "serde_json",
  "similar",
  "smallvec 1.15.1",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "tempfile",
  "termcolor",
  "test-programs-artifacts",
@@ -4809,7 +4816,7 @@ dependencies = [
  "serde_derive",
  "sha2",
  "smallvec 1.15.1",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "wasm-encoder 0.254.0",
  "wasmparser 0.254.0",
  "wasmprinter",
@@ -4856,7 +4863,7 @@ dependencies = [
  "quote",
  "rand 0.10.1",
  "smallvec 1.15.1",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "wasmparser 0.254.0",
  "wasmtime",
  "wasmtime-fuzzing",
@@ -4881,7 +4888,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec 1.15.1",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "tempfile",
  "tokio",
  "v8",
@@ -4979,7 +4986,7 @@ dependencies = [
  "object 0.39.0",
  "pulley-interpreter",
  "smallvec 1.15.1",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "thiserror 2.0.17",
  "wasmparser 0.254.0",
  "wasmtime-environ",
@@ -5009,7 +5016,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "wasmprinter",
  "wasmtime",
  "wasmtime-environ",
@@ -5094,7 +5101,7 @@ dependencies = [
  "gimli 0.33.0",
  "log",
  "object 0.39.0",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "wasmparser 0.254.0",
  "wasmtime-environ",
  "wasmtime-internal-cranelift",
@@ -5140,7 +5147,7 @@ dependencies = [
  "rand 0.10.1",
  "serde",
  "serde_derive",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "toml",
  "wasmparser 0.254.0",
  "wasmprinter",
@@ -5468,7 +5475,7 @@ dependencies = [
  "gimli 0.33.0",
  "regalloc2",
  "smallvec 1.15.1",
- "target-lexicon",
+ "target-lexicon 0.13.5",
  "thiserror 2.0.17",
  "wasmparser 0.254.0",
  "wasmtime-environ",
@@ -5942,6 +5949,16 @@ checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
  "rustix 1.1.4",
+]
+
+[[package]]
+name = "xed-sys"
+version = "0.6.0+xed-2024.05.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "078a73fb5587d5b3bb21262d2b38cf6a1e821ece8f7cbf9f82e61ca6f8a8df0e"
+dependencies = [
+ "cc",
+ "target-lexicon 0.12.16",
 ]
 
 [[package]]
